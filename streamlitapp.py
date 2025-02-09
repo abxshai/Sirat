@@ -110,14 +110,12 @@ def parse_chat_log(file_path):
         
         join_match = join_pattern.match(line)
         if join_match:
-            # e.g. "Alice added Bob"
             new_member = join_match.group(2).strip()
             global_members.add(new_member)
             join_exit_events.append(line.strip())
         
         left_match = left_pattern.match(line)
         if left_match:
-            # e.g. "Charlie left"
             member = left_match.group(1).strip()
             global_members.add(member)
             join_exit_events.append(line.strip())
@@ -134,6 +132,8 @@ def display_weekly_messages_table(messages_data, global_members):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
     # Parse timestamps using our robust parser.
     df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
+    # Force conversion to datetime to ensure the .dt accessor works.
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
     # Compute week start (Monday) and normalize to midnight.
     df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
     
@@ -178,6 +178,7 @@ def display_weekly_messages_table(messages_data, global_members):
 def display_member_statistics(messages_data):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
     df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
     
     # Group by member.
     grouped = df.groupby('Member Name').agg(
