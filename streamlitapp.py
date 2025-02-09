@@ -76,6 +76,7 @@ def extract_zip(zip_file):
     return "extracted"
 
 # Function to parse the chat log.
+# Now, in addition to the messages, we extract global_members from both message senders and join/left events.
 def parse_chat_log(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
         chats = file.readlines()
@@ -84,8 +85,12 @@ def parse_chat_log(file_path):
     user_messages = Counter()
     join_exit_events = []
     messages_data = []  # Detailed message records: timestamp, user, message
+    global_members = set()
+    
+    # Patterns for messages and join/left events.
     message_pattern = re.compile(r'(\d{1,2}/\d{1,2}/\d{2,4}, \d{1,2}:\d{2}) - (.*?): (.*)')
-    join_exit_pattern = re.compile(r'(.*) added (.*)|(.+) left')
+    join_pattern = re.compile(r'(.*) added (.*)')
+    left_pattern = re.compile(r'(.*) left')
     
     for line in chats:
         match = message_pattern.match(line)
@@ -94,64 +99,77 @@ def parse_chat_log(file_path):
             timestamp, user, message = match.groups()
             user_messages[user] += 1
             messages_data.append([timestamp, user, message])
+            global_members.add(user)
         
-        event_match = join_exit_pattern.match(line)
-        if event_match:
+        join_match = join_pattern.match(line)
+        if join_match:
+            # e.g. "Alice added Bob"
+            new_member = join_match.group(2).strip()
+            global_members.add(new_member)
+            join_exit_events.append(line.strip())
+        
+        left_match = left_pattern.match(line)
+        if left_match:
+            # e.g. "Charlie left"
+            member = left_match.group(1).strip()
+            # Even if they left, we include them in the global membership
+            global_members.add(member)
             join_exit_events.append(line.strip())
     
     return {
         'total_messages': total_messages,
         'user_messages': user_messages,
         'join_exit_events': join_exit_events,
-        'messages_data': messages_data
+        'messages_data': messages_data,
+        'global_members': sorted(global_members)
     }
 
-# Table 1: Weekly Message Breakdown (fix applied)
-def display_weekly_messages_table(messages_data):
+# Table 1: Weekly Message Breakdown
+# Now we pass in the global_members so that every week will include all known members.
+def display_weekly_messages_table(messages_data, global_members):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
-    # Parse the timestamp (expected format: "23/02/23, 02:21")
+    # Parse timestamp (expected format: "23/02/23, 02:21")
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%d/%m/%y, %H:%M', errors='coerce')
-    # Compute the week start (Monday) and normalize to midnight
+    # Compute week start (Monday) and normalize to midnight for consistency.
     df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
     
     if df.empty:
         st.write("No messages to display")
         return
     
-    # Determine the overall range of weeks
+    # Determine overall week range based on message timestamps.
     min_week_start = df['Week Start'].min()
     max_week_start = df['Week Start'].max()
     
-    # Create a list of Mondays from min to max
+    # Create a list of Mondays from min to max.
     weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
     
     rows = []
-    baseline_members = set()  # Running set of members seen so far
+    # Start baseline with global_members (so that even if the first week has no messages, we show everyone)
+    baseline_members = set(global_members)
     week_counter = 1
     
     for week_start in weeks:
         week_end = week_start + pd.Timedelta(days=6)
-        # Filter messages for the current week (exact match on normalized dates)
         week_mask = (df['Week Start'] == week_start)
         week_messages = df[week_mask]
         
-        # Update baseline if messages exist in the current week
+        # If there are new members in this week, update baseline.
         if not week_messages.empty:
             current_week_members = set(week_messages['Member Name'].unique())
             baseline_members = baseline_members.union(current_week_members)
         
-        # List each member from baseline even if they didn't message in the current week
-        if baseline_members:
-            for member in sorted(baseline_members):
-                count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
-                rows.append({
-                    'Week': f"Week {week_counter}",
-                    'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                    'Member Name': member,
-                    'Number of Messages Sent': count
-                })
+        # For every member in the baseline, get the message count (0 if none in the current week).
+        for member in sorted(baseline_members):
+            count = week_messages[week_messages['Member Name'] == member].shape[0]
+            rows.append({
+                'Week': f"Week {week_counter}",
+                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
+                'Member Name': member,
+                'Number of Messages Sent': count
+            })
         week_counter += 1
-
+    
     weekly_df = pd.DataFrame(rows)
     st.markdown("### Table 1: Weekly Message Breakdown")
     st.dataframe(weekly_df)
@@ -161,22 +179,22 @@ def display_member_statistics(messages_data):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%d/%m/%y, %H:%M', errors='coerce')
     
-    # For each member: first message, last message, total messages
+    # For each member: first message, last message, total messages sent.
     grouped = df.groupby('Member Name').agg(
         min_timestamp=('Timestamp', 'min'),
         max_timestamp=('Timestamp', 'max'),
         total_messages=('Message', 'count')
     ).reset_index()
     
-    # Membership duration (in weeks)
+    # Compute membership duration in weeks.
     grouped['Longest Membership Duration (Weeks)'] = ((grouped['max_timestamp'] - grouped['min_timestamp']).dt.days / 7).round().astype(int)
     
-    # Average weekly messages
+    # Average weekly messages (guard against division by zero).
     grouped['Avg. Weekly Messages'] = grouped.apply(
         lambda row: round(row['total_messages'] / row['Longest Membership Duration (Weeks)'], 2)
         if row['Longest Membership Duration (Weeks)'] > 0 else row['total_messages'], axis=1)
     
-    # Activity status: Active if last message was within 30 days of overall last message
+    # Determine activity status (Active if last message was within 30 days of overall last message).
     overall_last_date = df['Timestamp'].max()
     grouped['Group Activity Status'] = grouped['max_timestamp'].apply(
         lambda x: 'Active' if (overall_last_date - x).days <= 30 else 'Inactive')
@@ -213,13 +231,13 @@ if uploaded_file:
         stats = parse_chat_log(chat_log_path)
         st.success('Chat log parsed successfully!')
         
-        # Display Table 1: Weekly Message Breakdown
-        display_weekly_messages_table(stats['messages_data'])
+        # Display Table 1: Weekly Message Breakdown (pass global_members as well)
+        display_weekly_messages_table(stats['messages_data'], stats['global_members'])
         
         # Display Table 2: Member Statistics
         display_member_statistics(stats['messages_data'])
         
-        # Display a bar chart for total messages per user
+        # Display the bar chart for total messages per user
         display_total_messages_chart(stats['user_messages'])
         
         # LLM-based summary component (using aggregated data)
