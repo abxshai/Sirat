@@ -129,17 +129,34 @@ def parse_chat_log(file_path):
     }
 
 def display_weekly_messages_table(messages_data, global_members):
-    df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
-    # Parse timestamps using our robust parser.
-    df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
-    # Force conversion to datetime to ensure the .dt accessor works.
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-    # Compute week start (Monday) and normalize to midnight.
-    df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
-    
-    if df.empty or df['Week Start'].isnull().all():
-        st.write("No messages to display")
+    # Check if messages_data exists and is not empty
+    if messages_data is None or len(messages_data) == 0:
+        st.warning("No data available for weekly messages.")
         return
+    
+    # Create DataFrame with defined columns
+    df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
+    
+    # Ensure 'Timestamp' exists and convert it safely to datetime
+    if 'Timestamp' in df.columns:
+        df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+        df.dropna(subset=['Timestamp'], inplace=True)  # Remove rows where conversion failed
+        
+        # Compute the Week Start (Monday) and normalize to midnight
+        df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
+    else:
+        st.error("Error: 'Timestamp' column is missing from data.")
+        return
+    
+    # Ensure global_members is valid
+    if global_members is None or len(global_members) == 0:
+        st.warning("No data available for global members.")
+        return
+
+    # Add a selectbox filter for Member Name
+    member_options = ["All Members"] + sorted(global_members)
+    selected_member = st.selectbox("Select Member (or All Members)", member_options)
     
     # Determine the full range of weeks.
     min_week_start = df['Week Start'].min()
@@ -161,7 +178,12 @@ def display_weekly_messages_table(messages_data, global_members):
             current_week_members = set(week_messages['Member Name'].unique())
             baseline_members = baseline_members.union(current_week_members)
         
-        for member in sorted(baseline_members):
+        # If a specific member is selected, filter baseline to only that member.
+        members_to_show = sorted(baseline_members)
+        if selected_member != "All Members":
+            members_to_show = [selected_member]
+        
+        for member in members_to_show:
             count = week_messages[week_messages['Member Name'] == member].shape[0]
             rows.append({
                 'Week': f"Week {week_counter}",
