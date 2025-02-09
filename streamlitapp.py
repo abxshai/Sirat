@@ -36,7 +36,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Initialize LLM Client
-API_KEY = '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'
+API_KEY = st.secrets["API_KEY"]
 client = Groq(api_key=API_KEY)
 
 def get_llm_reply(prompt):
