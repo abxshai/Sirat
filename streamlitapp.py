@@ -69,21 +69,13 @@ def get_llm_reply(prompt):
         st.error(f"An error occurred: {e}")
         return None
 
+# Function to extract the zip file
 def extract_zip(zip_file):
     with zipfile.ZipFile(zip_file, 'r') as zip_ref:
         zip_ref.extractall("extracted")
     return "extracted"
 
-def parse_timestamp(timestamp_str):
-    """Try multiple timestamp formats to robustly parse chat timestamps."""
-    for fmt in ['%d/%m/%y, %H:%M', '%d/%m/%Y, %I:%M %p']:
-        try:
-            return pd.to_datetime(timestamp_str, format=fmt)
-        except Exception:
-            continue
-    return pd.NaT
-
-@st.cache_data(show_spinner=False)
+# Function to parse the chat log.
 def parse_chat_log(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
         chats = file.readlines()
@@ -91,130 +83,100 @@ def parse_chat_log(file_path):
     total_messages = 0
     user_messages = Counter()
     join_exit_events = []
-    messages_data = []  # Each element: [timestamp_str, user, message]
-    global_members = set()
-    
-    # Regular expressions for messages and join/left events.
+    messages_data = []  # Detailed message records: timestamp, user, message
     message_pattern = re.compile(r'(\d{1,2}/\d{1,2}/\d{2,4}, \d{1,2}:\d{2}) - (.*?): (.*)')
-    join_pattern = re.compile(r'(.*) added (.*)')
-    left_pattern = re.compile(r'(.*) left')
+    join_exit_pattern = re.compile(r'(.*) added (.*)|(.+) left')
     
     for line in chats:
         match = message_pattern.match(line)
         if match:
             total_messages += 1
-            timestamp_str, user, message = match.groups()
+            timestamp, user, message = match.groups()
             user_messages[user] += 1
-            messages_data.append([timestamp_str, user, message])
-            global_members.add(user)
+            messages_data.append([timestamp, user, message])
         
-        join_match = join_pattern.match(line)
-        if join_match:
-            new_member = join_match.group(2).strip()
-            global_members.add(new_member)
-            join_exit_events.append(line.strip())
-        
-        left_match = left_pattern.match(line)
-        if left_match:
-            member = left_match.group(1).strip()
-            global_members.add(member)
+        event_match = join_exit_pattern.match(line)
+        if event_match:
             join_exit_events.append(line.strip())
     
     return {
         'total_messages': total_messages,
         'user_messages': user_messages,
         'join_exit_events': join_exit_events,
-        'messages_data': messages_data,
-        'global_members': sorted(global_members)
+        'messages_data': messages_data
     }
 
-def display_weekly_messages_table(messages_data, global_members):
-    # Check if messages_data exists and is not empty
-    if messages_data is None or len(messages_data) == 0:
-        st.warning("No data available for weekly messages.")
-        return
-    
-    # Create DataFrame with defined columns
+# Table 1: Weekly Message Breakdown (fix applied)
+def display_weekly_messages_table(messages_data):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
+    # Parse the timestamp (expected format: "23/02/23, 02:21")
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%d/%m/%y, %H:%M', errors='coerce')
+    # Compute the week start (Monday) and normalize to midnight
+    df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
     
-    # Ensure 'Timestamp' exists and convert it safely to datetime
-    if 'Timestamp' in df.columns:
-        df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df.dropna(subset=['Timestamp'], inplace=True)  # Remove rows where conversion failed
-        
-        # Compute the Week Start (Monday) and normalize to midnight
-        df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
-    else:
-        st.error("Error: 'Timestamp' column is missing from data.")
+    if df.empty:
+        st.write("No messages to display")
         return
     
-    # Ensure global_members is valid
-    if global_members is None or len(global_members) == 0:
-        st.warning("No data available for global members.")
-        return
-
-    # Add a selectbox filter for Member Name
-    member_options = ["All Members"] + sorted(global_members)
-    selected_member = st.selectbox("Select Member (or All Members)", member_options)
-    
-    # Determine the full range of weeks.
+    # Determine the overall range of weeks
     min_week_start = df['Week Start'].min()
     max_week_start = df['Week Start'].max()
+    
+    # Create a list of Mondays from min to max
     weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
     
     rows = []
-    # Use global_members as baseline so every week includes all members.
-    baseline_members = set(global_members)
+    baseline_members = set()  # Running set of members seen so far
     week_counter = 1
     
     for week_start in weeks:
         week_end = week_start + pd.Timedelta(days=6)
+        # Filter messages for the current week (exact match on normalized dates)
         week_mask = (df['Week Start'] == week_start)
         week_messages = df[week_mask]
         
-        # Update baseline with any new members messaging this week.
+        # Update baseline if messages exist in the current week
         if not week_messages.empty:
             current_week_members = set(week_messages['Member Name'].unique())
             baseline_members = baseline_members.union(current_week_members)
         
-        # If a specific member is selected, filter baseline to only that member.
-        members_to_show = sorted(baseline_members)
-        if selected_member != "All Members":
-            members_to_show = [selected_member]
-        
-        for member in members_to_show:
-            count = week_messages[week_messages['Member Name'] == member].shape[0]
-            rows.append({
-                'Week': f"Week {week_counter}",
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Number of Messages Sent': count
-            })
+        # List each member from baseline even if they didn't message in the current week
+        if baseline_members:
+            for member in sorted(baseline_members):
+                count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
+                rows.append({
+                    'Week': f"Week {week_counter}",
+                    'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
+                    'Member Name': member,
+                    'Number of Messages Sent': count
+                })
         week_counter += 1
-    
+
     weekly_df = pd.DataFrame(rows)
     st.markdown("### Table 1: Weekly Message Breakdown")
     st.dataframe(weekly_df)
 
+# Table 2: Member Statistics
 def display_member_statistics(messages_data):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
-    df['Timestamp'] = df['Timestamp'].apply(parse_timestamp)
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%d/%m/%y, %H:%M', errors='coerce')
     
-    # Group by member.
+    # For each member: first message, last message, total messages
     grouped = df.groupby('Member Name').agg(
         min_timestamp=('Timestamp', 'min'),
         max_timestamp=('Timestamp', 'max'),
         total_messages=('Message', 'count')
     ).reset_index()
     
-    # Membership duration in weeks.
+    # Membership duration (in weeks)
     grouped['Longest Membership Duration (Weeks)'] = ((grouped['max_timestamp'] - grouped['min_timestamp']).dt.days / 7).round().astype(int)
+    
+    # Average weekly messages
     grouped['Avg. Weekly Messages'] = grouped.apply(
         lambda row: round(row['total_messages'] / row['Longest Membership Duration (Weeks)'], 2)
         if row['Longest Membership Duration (Weeks)'] > 0 else row['total_messages'], axis=1)
     
+    # Activity status: Active if last message was within 30 days of overall last message
     overall_last_date = df['Timestamp'].max()
     grouped['Group Activity Status'] = grouped['max_timestamp'].apply(
         lambda x: 'Active' if (overall_last_date - x).days <= 30 else 'Inactive')
@@ -225,6 +187,7 @@ def display_member_statistics(messages_data):
     st.markdown("### Table 2: Member Statistics")
     st.dataframe(table2)
 
+# Bar chart for total messages per user
 def display_total_messages_chart(user_messages):
     df = pd.DataFrame(user_messages.items(), columns=['Member Name', 'Messages'])
     fig = px.bar(df, x='Member Name', y='Messages', 
@@ -251,15 +214,15 @@ if uploaded_file:
         st.success('Chat log parsed successfully!')
         
         # Display Table 1: Weekly Message Breakdown
-        display_weekly_messages_table(stats['messages_data'], stats['global_members'])
+        display_weekly_messages_table(stats['messages_data'])
         
         # Display Table 2: Member Statistics
         display_member_statistics(stats['messages_data'])
         
-        # Display bar chart for total messages per user.
+        # Display a bar chart for total messages per user
         display_total_messages_chart(stats['user_messages'])
         
-        # LLM-based summary component.
+        # LLM-based summary component (using aggregated data)
         st.markdown("### LLM Summary of Chat Log")
         if st.button("Generate Summary"):
             with st.spinner("Analyzing chat log..."):
