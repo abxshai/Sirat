@@ -1,0 +1,7 @@
+streamlit
+streamlit-echarts
+pandas
+plotly
+wordcloud
+matplotlib
+groq
