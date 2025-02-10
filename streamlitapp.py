@@ -75,7 +75,7 @@ def parse_chat_log(file_path):
     join_exit_events = []
     messages_data = []
     
-    message_pattern = re.compile(r'(\d{1,2}/\d{1,2}/\d{2,4}, \d{1,2}:\d{2} [APap][Mm]) - (.*?): (.*)')
+    message_pattern = re.compile(r'(\d{1,2}/\d{1,2}/\d{2,4}, \d{1,2}:\d{2} [APap][Mm]) - ([^:]+): (.*)')
     join_exit_pattern = re.compile(r'(.*) added (.*)|(.+) left')
     
     for line in chats:
@@ -109,14 +109,17 @@ def display_weekly_messages(messages_data):
 
 def display_member_statistics(messages_data):
     df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
+    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
+    
     grouped = df.groupby('Member Name').agg(
         first_message=('Timestamp', 'min'),
         last_message=('Timestamp', 'max'),
         total_messages=('Message', 'count')
     ).reset_index()
     
-    grouped['Longest Membership Duration (Weeks)'] = ((grouped['last_message'] - grouped['first_message']).dt.days / 7).astype(int)
+    grouped['Longest Membership Duration (Weeks)'] = ((grouped['last_message'] - grouped['first_message']).dt.days / 7).astype('Int64')
     grouped['Avg. Weekly Messages'] = grouped['total_messages'] / grouped['Longest Membership Duration (Weeks)']
+    grouped['Avg. Weekly Messages'] = grouped['Avg. Weekly Messages'].fillna(0).round(2)
     
     last_message_date = df['Timestamp'].max()
     grouped['Group Activity Status'] = grouped['last_message'].apply(lambda x: 'Active' if (last_message_date - x).days <= 30 else 'Inactive')
