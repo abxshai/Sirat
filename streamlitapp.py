@@ -31,7 +31,7 @@ API_KEY = st.secrets["API_KEY"]
 client = Groq(api_key=API_KEY)
 
 def get_llm_reply(client, prompt, word_placeholder):
-    """Get an LLM summary reply using the Groq API with llama-3.3-70b-versatile."""
+    """Get an LLM summary reply using the Groq API with model llama-3.3-70b-versatile."""
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -55,12 +55,14 @@ def get_llm_reply(client, prompt, word_placeholder):
             stream=True,
             stop=None,
         )
+        
         response = ""
         for chunk in completion:
             delta = chunk.choices[0].delta.content or ""
             response += delta
             word_placeholder.write(response)
         return response
+    
     except Exception as e:
         st.error(f"Error generating LLM reply: {str(e)}")
         return None
@@ -87,20 +89,20 @@ def parse_chat_log_file(uploaded_file):
     except Exception as e:
         st.error(f"Error reading chat log: {str(e)}")
         return None
-
+    
     try:
         total_messages = 0
         user_messages = Counter()
         join_exit_events = []
         messages_data = []
         global_members = set()
-
-        # Regex pattern for WhatsApp messages (accepts optional square brackets around the timestamp)
+        
+        # Regex pattern for WhatsApp messages (optional square brackets and optional dash)
         message_pattern = re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-\s*(.*?):\s(.*)$'
+            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
         )
-
-        # System message patterns (for join/exit events)
+        
+        # System message patterns (join/exit events, etc.)
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -113,11 +115,12 @@ def parse_chat_log_file(uploaded_file):
             r'(.+) changed their phone number'
         ]
         system_pattern = '|'.join(system_patterns)
-
+        
         for line in chats:
             line = line.strip()
             if not line:
                 continue
+            
             message_found = False
             match = re.match(message_pattern, line)
             if match:
@@ -139,7 +142,7 @@ def parse_chat_log_file(uploaded_file):
                     continue
             if not message_found and re.search(system_pattern, line):
                 join_exit_events.append(line)
-
+        
         return {
             'total_messages': total_messages,
             'user_messages': user_messages,
@@ -147,6 +150,7 @@ def parse_chat_log_file(uploaded_file):
             'messages_data': messages_data,
             'global_members': sorted(global_members)
         }
+    
     except Exception as e:
         st.error(f"Error parsing chat log data: {str(e)}")
         return None
@@ -164,22 +168,22 @@ def display_weekly_messages_table(messages_data, global_members):
         if not messages_data:
             st.write("No messages to display")
             return
-
+        
         df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
-
+        
         # Compute week start (Monday) for each message
         df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
-
+        
         if df.empty:
             st.write("No valid messages to display")
             return
-
+        
         min_week_start = df['Week Start'].min()
         max_week_start = df['Week Start'].max()
         weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
-
+        
         rows = []
         week_counter = 1
         for week_start in weeks:
@@ -195,12 +199,12 @@ def display_weekly_messages_table(messages_data, global_members):
                     'Number of Messages Sent': count
                 })
             week_counter += 1
-
+        
         weekly_df = pd.DataFrame(rows)
         st.markdown("### Table 1: Weekly Message Breakdown")
         st.dataframe(weekly_df)
-
-        # Bar Chart: Total messages per member
+        
+        # Plot a bar chart of total messages per member
         fig, ax = plt.subplots(figsize=(10, 5))
         user_totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
         if not user_totals.empty:
@@ -228,34 +232,38 @@ def display_member_statistics(messages_data):
         if not messages_data:
             st.write("No messages to display")
             return
-
+        
         df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
+        
         if df.empty:
             st.write("No valid messages to display")
             return
-
+        
         grouped = df.groupby('Member Name').agg(
             first_message=('Timestamp', 'min'),
             last_message=('Timestamp', 'max'),
             total_messages=('Message', 'count')
         ).reset_index()
-
-        grouped['Longest Membership Duration (Weeks)'] = ((grouped['last_message'] - grouped['first_message']).dt.days / 7).round().astype('Int64')
+        
+        grouped['Longest Membership Duration (Weeks)'] = (
+            (grouped['last_message'] - grouped['first_message']).dt.days / 7
+        ).round().astype('Int64')
+        
         grouped['Avg. Weekly Messages'] = grouped.apply(
             lambda row: round(row['total_messages'] / max(row['Longest Membership Duration (Weeks)'], 1), 2),
             axis=1
         )
-
+        
         overall_last_date = df['Timestamp'].max()
         grouped['Group Activity Status'] = grouped['last_message'].apply(
             lambda x: 'Active' if (overall_last_date - x).days <= 30 else 'Inactive'
         )
-
+        
         grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
         table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Longest Membership Duration (Weeks)', 'Avg. Weekly Messages']]
-
+        
         st.markdown("### Table 2: Member Statistics")
         st.dataframe(table2)
     except Exception as e:
@@ -269,16 +277,16 @@ def display_total_messages_chart(user_messages):
         if not user_messages:
             st.write("No message data to display")
             return
-
+        
         df = pd.DataFrame(user_messages.items(), columns=['Member Name', 'Messages'])
         if df.empty:
             st.write("No message data to display")
             return
-
+        
         fig = px.bar(
-            df,
-            x='Member Name',
-            y='Messages',
+            df, 
+            x='Member Name', 
+            y='Messages', 
             title='Total Messages Sent by Each User',
             color='Messages'
         )
@@ -293,10 +301,6 @@ st.title("Structured Chat Log Analyzer")
 uploaded_file = st.file_uploader("Upload a TXT file containing the WhatsApp chat log", type="txt")
 
 if uploaded_file:
-    # Save the uploaded file to a temporary file
-    with open("temp_chat.txt", "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    
     stats = parse_chat_log_file(uploaded_file)
     if stats:
         st.success("Chat log parsed successfully!")
