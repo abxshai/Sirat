@@ -79,7 +79,7 @@ def get_llm_reply(client, prompt, word_placeholder):
                     "role": "system",
                     "content": ("Analyze the chat log, and summarize key details such as "
                                 "the highest message sender, people who joined the group, "
-                                "and joining/exiting trends on a weekly or monthly basis.")
+                                "and joining/exiting trends on a weekly or monthly basis, mention the inactive members name with a message count, take zero if none, display everything in a tabular format")
                 },
                 {
                     "role": "user",
