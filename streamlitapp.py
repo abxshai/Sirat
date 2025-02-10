@@ -1,10 +1,7 @@
 import streamlit as st
-from streamlit_echarts import st_echarts
 import pandas as pd
 import plotly.express as px
-from wordcloud import WordCloud
 import matplotlib.pyplot as plt
-from io import BytesIO
 import zipfile
 import os
 import re
@@ -104,7 +101,7 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 # -------------------------------
-# Function to safely extract the zip file
+# Function to safely extract a ZIP file
 # -------------------------------
 def safe_extract_zip(uploaded_file):
     """
@@ -124,6 +121,7 @@ def safe_extract_zip(uploaded_file):
         with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
         
+        # Choose the largest .txt file as the chat log
         chat_log_path = None
         max_size = 0
         for root, _, files in os.walk(extract_path):
@@ -141,16 +139,16 @@ def safe_extract_zip(uploaded_file):
         return None
 
 # -------------------------------
-# Function to parse the chat log with robust error handling
+# Function to parse the WhatsApp chat log
 # -------------------------------
 def parse_chat_log(file_path):
     """
-    Parse a WhatsApp chat log file with robust error handling and return aggregated data.
+    Parse a WhatsApp chat log file (TXT) with robust error handling and return aggregated data.
     Returns a dictionary with:
       - messages_data: list of dicts with keys 'Timestamp', 'Member Name', 'Message'
       - user_messages: Counter of messages per user
       - global_members: Sorted list of all member names
-      - join_exit_events: List of system messages
+      - join_exit_events: List of system messages (if any)
     """
     if not file_path or not os.path.exists(file_path):
         st.error("Chat log file not found.")
@@ -182,11 +180,12 @@ def parse_chat_log(file_path):
         messages_data = []
         global_members = set()
         
-        # Improved regex: accepts optional square brackets around the timestamp.
+        # Regex pattern for WhatsApp messages; accepts optional square brackets around timestamp.
         message_pattern = re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-\s*(.*?):\s(.*)$'
         )
         
+        # Patterns for system messages (join/exit events, etc.)
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -214,6 +213,7 @@ def parse_chat_log(file_path):
                 try:
                     timestamp_str, user, message = match.groups()
                     user = clean_member_name(user)
+                    
                     try:
                         parsed_date = date_parser.parse(timestamp_str, fuzzy=True)
                     except Exception:
@@ -388,7 +388,7 @@ def display_total_messages_chart(user_messages):
 # Main App Layout
 # -------------------------------
 st.title("Structured Chat Log Analyzer")
-uploaded_file = st.file_uploader("Upload a zip file containing the chat log", type="zip")
+uploaded_file = st.file_uploader("Upload a zip file containing the WhatsApp chat log", type="zip")
 
 if uploaded_file:
     chat_log_path = safe_extract_zip(uploaded_file)
@@ -410,16 +410,5 @@ if uploaded_file:
             st.markdown("### LLM Summary of Chat Log")
             if st.button("Generate Summary"):
                 with st.spinner("Analyzing chat log..."):
-                    top_users = {d['Member Name']: 0 for d in stats['messages_data']}
-                    snippet_events = stats['messages_data'][:20]
-                    prompt = (f"Summarize the chat log with these key points:\n"
-                              f"- Top message senders: {top_users}\n"
-                              f"- Sample messages (first 20): {snippet_events}\n")
-                    word_placeholder = st.empty()
-                    get_llm_reply(client, prompt, word_placeholder)
-        else:
-            st.error("Error parsing chat log.")
-    else:
-        st.error("No chat log file found in the zip archive.")
-else:
-    st.info("Please upload a zip file containing the WhatsApp chat log.")
+                    # Create a simple aggregation for summary; you can adjust as needed.
+                    top_users = {d['Member Name']: 0 for d in stats['messages_data']}\n  
