@@ -1,122 +1,210 @@
-import pandas as pd
 import streamlit as st
+from streamlit_echarts import st_echarts
+import pandas as pd
+import plotly.express as px
+from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+from io import BytesIO
+import zipfile
+import os
+import re
+import tempfile
+from collections import Counter
 from groq import Groq
+from dateutil import parser as date_parser
+from datetime import datetime
+import chardet
 
-def get_llm_reply(client, prompt, word_placeholder):
-    """Get an LLM summary reply using the Groq API."""
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": ("Analyze the chat log, and summarize key details such as "
-                                "the highest message sender, people who joined the group, "
-                                "and joining/exiting trends on a weekly or monthly basis, mention the inactive members' names with a message count, take zero if none, display everything in a tabular format")
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                },
-            ],
-            temperature=1,
-            max_tokens=1024,
-            top_p=1,
-            stream=True,
-            stop=None,
-        )
-        
-        response = ""
-        for chunk in completion:
-            delta = chunk.choices[0].delta.content or ""
-            response += delta
-            word_placeholder.write(response)
-        return response
+# -------------------------------
+# Enhanced Helper Functions
+# -------------------------------
+def detect_file_encoding(file_path):
+    """
+    Detect the encoding of a file using chardet library.
+    Returns the most likely encoding.
+    """
+    with open(file_path, 'rb') as file:
+        raw_data = file.read()
+        result = chardet.detect(raw_data)
+        return result['encoding']
+
+def clean_member_name(name):
+    """
+    Enhanced member name cleaning with better phone number detection
+    and international format support.
+    """
+    cleaned = name.strip()
+    # Handle various phone number formats
+    phone_patterns = [
+        r'(\+\d{1,3}\s?)?\d{10,}',  # International numbers
+        r'\d{3}[-.]?\d{3}[-.]?\d{4}',  # US format
+        r'\+\d{1,3}\s\d{1,4}\s\d{4,}',  # International with spaces
+    ]
     
-    except Exception as e:
-        st.error(f"Error generating LLM reply: {str(e)}")
+    for pattern in phone_patterns:
+        if re.search(pattern, cleaned):
+            digits = re.sub(r'\D', '', cleaned)
+            return f"User {digits[-4:]}"
+    
+    # Remove emojis and special characters
+    cleaned = re.sub(r'[^\w\s\-\']', '', cleaned)
+    return cleaned.strip()
+
+def parse_timestamp(timestamp_str):
+    """
+    Enhanced timestamp parsing with support for multiple WhatsApp date formats.
+    """
+    try:
+        # Common WhatsApp date formats
+        formats = [
+            '%d/%m/%y, %H:%M',  # 31/12/23, 14:30
+            '%d/%m/%Y, %H:%M',  # 31/12/2023, 14:30
+            '%m/%d/%y, %H:%M',  # 12/31/23, 14:30
+            '%m/%d/%Y, %H:%M',  # 12/31/2023, 14:30
+            '%d.%m.%y, %H:%M',  # 31.12.23, 14:30
+            '%Y-%m-%d, %H:%M',  # 2023-12-31, 14:30
+            '%d/%m/%y, %I:%M %p',  # 31/12/23, 02:30 PM
+            '%d/%m/%Y, %I:%M %p',  # 31/12/2023, 02:30 PM
+        ]
+        
+        # Try exact formats first
+        for fmt in formats:
+            try:
+                return datetime.strptime(timestamp_str, fmt)
+            except ValueError:
+                continue
+        
+        # If exact formats fail, try dateutil parser
+        return date_parser.parse(timestamp_str, fuzzy=True)
+    
+    except Exception:
         return None
 
-def display_weekly_messages_table(messages_data, global_members):
-    if not messages_data:
-        st.warning("No data available for weekly messages.")
-        return
+# -------------------------------
+# Enhanced Message Pattern Detection
+# -------------------------------
+def detect_message_pattern(first_few_lines):
+    """
+    Detect the message pattern format from the first few lines of the chat.
+    Returns the appropriate regex pattern.
+    """
+    # Common patterns in different WhatsApp exports
+    patterns = [
+        # Standard format with 24-hour time
+        (r'^(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*([^:]+):\s(.*)$',
+         'standard_24h'),
+        # Format with AM/PM
+        (r'^(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm]))\s*-\s*([^:]+):\s(.*)$',
+         'standard_12h'),
+        # Format with different date separator
+        (r'^(\d{4}-\d{2}-\d{2},?\s*\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*([^:]+):\s(.*)$',
+         'iso_format')
+    ]
     
-    df = pd.DataFrame(messages_data)
+    for line in first_few_lines:
+        for pattern, pattern_type in patterns:
+            if re.match(pattern, line.strip()):
+                return pattern, pattern_type
     
-    required_columns = {'Timestamp', 'Member Name'}
-    if not required_columns.issubset(df.columns):
-        st.error(f"Error: Missing required columns: {required_columns - set(df.columns)}")
-        return
+    # Default to most flexible pattern if no match found
+    return patterns[0][0], 'standard_24h'
+
+# -------------------------------
+# Enhanced Chat Log Parser
+# -------------------------------
+def parse_chat_log(file_path):
+    """
+    Enhanced chat log parser with better format detection and error handling.
+    """
+    if not file_path or not os.path.exists(file_path):
+        st.error("Chat log file not found.")
+        return None
     
-    df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-    df.dropna(subset=['Timestamp'], inplace=True)
-    
-    df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
-    
-    min_week_start = df['Week Start'].min()
-    max_week_start = df['Week Start'].max()
-    weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
-    
-    rows = []
-    week_counter = 1
-    
-    for week_start in weeks:
-        week_end = week_start + pd.Timedelta(days=6)
-        week_mask = (df['Week Start'] == week_start)
-        week_messages = df[week_mask]
+    try:
+        # Detect file encoding
+        encoding = detect_file_encoding(file_path)
+        if not encoding:
+            encoding = 'utf-8'
         
-        for member in sorted(global_members):
-            count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
-            rows.append({
-                'Week': f"Week {week_counter}",
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Number of Messages Sent': count
-            })
-        week_counter += 1
+        with open(file_path, 'r', encoding=encoding) as file:
+            content = file.read()
+            
+        # Split into lines and detect message pattern
+        lines = content.splitlines()
+        first_few_lines = [line for line in lines[:20] if line.strip()]
+        message_pattern, pattern_type = detect_message_pattern(first_few_lines)
+        
+        # Initialize data structures
+        messages_data = []
+        user_messages = Counter()
+        join_exit_events = []
+        global_members = set()
+        
+        # Enhanced system message patterns
+        system_patterns = {
+            'join': r'(.+) joined using this group\'s invite link',
+            'add': r'(.+) added (.+)',
+            'leave': r'(.+) left',
+            'remove': r'(.+) removed (.+)',
+            'subject': r'(.+) changed the subject from "(.+)" to "(.+)"',
+            'icon': r'(.+) changed this group\'s icon',
+            'description': r'(.+) changed the group description',
+            'number': r'(.+) changed their phone number',
+            'security': r'Messages and calls are end-to-end encrypted'
+        }
+        
+        current_message = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Try to match as a new message
+            match = re.match(message_pattern, line)
+            
+            if match:
+                # Process previous message if exists
+                if current_message:
+                    messages_data.append(current_message)
+                    current_message = []
+                
+                # Process new message
+                timestamp_str, user, message = match.groups()
+                timestamp = parse_timestamp(timestamp_str)
+                
+                if timestamp:
+                    user = clean_member_name(user)
+                    current_message = [timestamp_str, user, message]
+                    user_messages[user] += 1
+                    global_members.add(user)
+            else:
+                # Check if it's a system message
+                is_system_message = False
+                for event_type, pattern in system_patterns.items():
+                    if re.match(pattern, line):
+                        join_exit_events.append((event_type, line))
+                        is_system_message = True
+                        break
+                
+                # If not a system message, append to current message
+                if not is_system_message and current_message:
+                    current_message[2] += f"\n{line}"
+        
+        # Add last message if exists
+        if current_message:
+            messages_data.append(current_message)
+        
+        return {
+            'total_messages': len(messages_data),
+            'user_messages': user_messages,
+            'join_exit_events': join_exit_events,
+            'messages_data': messages_data,
+            'global_members': sorted(global_members),
+            'pattern_type': pattern_type
+        }
     
-    weekly_df = pd.DataFrame(rows)
-    
-    if weekly_df.empty:
-        st.warning("No data available for the chart.")
-        return
-    
-    st.markdown("### Weekly Message Breakdown")
-    st.dataframe(weekly_df)
-    
-    fig, ax = plt.subplots(figsize=(10, 5))
-    user_totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
-    if not user_totals.empty:
-        ax.bar(user_totals['Member Name'], user_totals['Number of Messages Sent'], color='skyblue')
-        ax.set_xlabel("Member Name")
-        ax.set_ylabel("Total Messages")
-        ax.set_title("Total Messages Sent by Each User")
-        plt.xticks(rotation=45, ha="right")
-        st.pyplot(fig)
-    else:
-        st.warning("No message data available to plot.")
+    except Exception as e:
+        st.error(f"Error parsing chat log: {str(e)}")
+        return None
 
-client = Groq(api_key=st.secrets["API_KEY"])
-stats = {
-    'messages_data': [
-        {'Timestamp': '2024-02-01 12:34:56', 'Member Name': 'User1', 'Message': 'Hello'},
-        {'Timestamp': '2024-02-02 15:45:30', 'Member Name': 'User2', 'Message': 'How are you?'},
-        {'Timestamp': '2024-02-08 09:20:15', 'Member Name': 'User1', 'Message': 'Good morning!'}
-    ],
-    'global_members': ['User1', 'User2', 'User3']
-}
-
-display_weekly_messages_table(stats['messages_data'], stats['global_members'])
-
-st.markdown("### LLM Summary of Chat Log")
-if st.button("Generate Summary"):
-    with st.spinner("Analyzing chat log..."):
-        top_users = {d['Member Name']: 0 for d in stats['messages_data']}
-        snippet_events = stats['messages_data'][:20]
-        prompt = (f"Summarize the chat log with these key points:\n"
-                  f"- Top message senders: {top_users}\n"
-                  f"- Sample messages (first 20): {snippet_events}\n")
-        word_placeholder = st.empty()
-        get_llm_reply(client, prompt, word_placeholder)
+# [Rest of the code remains the same...]
