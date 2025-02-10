@@ -100,7 +100,7 @@ def parse_chat_log_file(uploaded_file):
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
         )
 
-        # System message patterns (for join/exit events, etc.)
+        # System message patterns (for join/exit events)
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -158,7 +158,7 @@ def display_weekly_messages_table(messages_data, global_members):
     """
     Create Table 1: Weekly Message Breakdown.
     For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week)
-    with their message count (or 0 if inactive) and the cumulative follower count.
+    with their message count (or 0 if inactive) and a cumulative follower count.
     """
     try:
         if not messages_data:
@@ -169,20 +169,23 @@ def display_weekly_messages_table(messages_data, global_members):
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
 
-        # Compute week start (Monday) for each message
+        # Compute the Monday of the week for each message
         df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
 
         if df.empty:
             st.write("No valid messages to display")
             return
 
-        # Limit weeks up to current week
+        # Use the current week as the limit for the table
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        min_week_start = df['Week Start'].min()
-        weeks = pd.date_range(start=min_week_start, end=current_week_start, freq='W-MON')
 
-        # Compute each member's join date (first message timestamp)
+        # Get the Monday of the week of the earliest message
+        min_timestamp = df['Timestamp'].min()
+        first_monday = min_timestamp - timedelta(days=min_timestamp.weekday())
+        weeks = pd.date_range(start=first_monday, end=current_week_start, freq='W-MON')
+
+        # For each member, compute join date as the first message timestamp
         member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
 
         rows = []
@@ -191,9 +194,9 @@ def display_weekly_messages_table(messages_data, global_members):
             week_end = week_start + timedelta(days=6)
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
-            # Eligible members: those whose join date is <= week_end
+            # Only include members who joined on or before week_end
             eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
-            # Follower count is the cumulative count of eligible members at this week
+            # Follower count is the cumulative number of eligible members for this week
             follower_count = len(eligible_members)
             for member in sorted(eligible_members):
                 count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
@@ -231,7 +234,7 @@ def display_member_statistics(messages_data):
     For each member, show:
       - Unique Member Name
       - Group Activity Status (Active if total messages > 0, otherwise Inactive)
-      - Membership Duration (Weeks) calculated from the first message until current week
+      - Membership Duration (Weeks) from first message until current week
       - Avg. Weekly Messages
     """
     try:
@@ -259,7 +262,7 @@ def display_member_statistics(messages_data):
             axis=1
         )
 
-        # Revised activity logic: if total_messages > 0 then Active, else Inactive.
+        # Revised activity logic: if total_messages > 0 then Active, otherwise Inactive.
         grouped['Group Activity Status'] = grouped['total_messages'].apply(lambda x: 'Active' if x > 0 else 'Inactive')
 
         grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
