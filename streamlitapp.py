@@ -22,10 +22,7 @@ def clean_member_name(name):
     using the last 4 digits. Otherwise, return the cleaned name.
     """
     cleaned = name.strip()
-    # Remove all non-digit characters to see how many digits there are.
     digits_only = re.sub(r'\D', '', cleaned)
-    # If the difference between the length of the name and digits is small,
-    # assume it's a phone number (e.g., "+1234567890" or "1234567890").
     if len(cleaned) - len(digits_only) <= 2 and len(digits_only) >= 7:
         return "User " + digits_only[-4:]
     else:
@@ -79,7 +76,9 @@ def get_llm_reply(client, prompt, word_placeholder):
                     "role": "system",
                     "content": ("Analyze the chat log, and summarize key details such as "
                                 "the highest message sender, people who joined the group, "
-                                "and joining/exiting trends on a weekly or monthly basis, mention the inactive members name with a message count, take zero if none, display everything in a tabular format")
+                                "and joining/exiting trends on a weekly or monthly basis, "
+                                "mention the inactive members' names with a message count (0 if none), "
+                                "and display everything in a tabular format.")
                 },
                 {
                     "role": "user",
@@ -105,40 +104,36 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 # -------------------------------
-# Function to safely extract and read files
+# Function to safely extract the zip file
 # -------------------------------
 def safe_extract_zip(uploaded_file):
-    """Safely extract the zip file to a temporary directory and return the path of the chat log (.txt) file."""
+    """
+    Safely extract the zip file to a temporary directory and return the path
+    of the most relevant chat log (.txt) file (largest file).
+    """
     if uploaded_file is None:
         return None
     
     try:
-        # Create a temporary file for the uploaded zip
         temp_zip_path = os.path.join(st.session_state.temp_dir, "uploaded.zip")
-        
-        # Write the uploaded file to disk
         with open(temp_zip_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         
-        # Extract the zip file to a subdirectory
         extract_path = os.path.join(st.session_state.temp_dir, "extracted")
         os.makedirs(extract_path, exist_ok=True)
-        
         with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
             zip_ref.extractall(extract_path)
         
-        # Find the chat log file (.txt) - improved to find the most relevant file
         chat_log_path = None
         max_size = 0
         for root, _, files in os.walk(extract_path):
             for file in files:
                 if file.endswith('.txt'):
                     file_path = os.path.join(root, file)
-                    file_size = os.path.getsize(file_path)
-                    if file_size > max_size:
-                        max_size = file_size
+                    size = os.path.getsize(file_path)
+                    if size > max_size:
+                        max_size = size
                         chat_log_path = file_path
-        
         return chat_log_path
     
     except Exception as e:
@@ -149,31 +144,33 @@ def safe_extract_zip(uploaded_file):
 # Function to parse the chat log with robust error handling
 # -------------------------------
 def parse_chat_log(file_path):
-    """Parse any WhatsApp chat log file with robust error handling and return aggregated data."""
+    """
+    Parse a WhatsApp chat log file with robust error handling and return aggregated data.
+    Returns a dictionary with:
+      - messages_data: list of dicts with keys 'Timestamp', 'Member Name', 'Message'
+      - user_messages: Counter of messages per user
+      - global_members: Sorted list of all member names
+      - join_exit_events: List of system messages
+    """
     if not file_path or not os.path.exists(file_path):
         st.error("Chat log file not found.")
         return None
     
     try:
-        # Try different encodings
         encodings = ['utf-8', 'latin-1', 'utf-16', 'ascii']
         file_content = None
-        
         for encoding in encodings:
             try:
-                with open(file_path, 'r', encoding=encoding) as file:
-                    file_content = file.read()
+                with open(file_path, 'r', encoding=encoding) as f:
+                    file_content = f.read()
                 break
             except UnicodeDecodeError:
                 continue
-        
         if file_content is None:
             st.error("Unable to read the file with any supported encoding.")
             return None
         
-        # Split into lines
         chats = file_content.splitlines()
-        
     except Exception as e:
         st.error(f"Error reading chat log: {str(e)}")
         return None
@@ -185,12 +182,11 @@ def parse_chat_log(file_path):
         messages_data = []
         global_members = set()
         
-        # Improved message pattern for WhatsApp exports (flexible regex)
+        # Improved regex: accepts optional square brackets around the timestamp.
         message_pattern = re.compile(
-            r'^(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\s*-\s*(.*?):\s(.*)$'
+            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-\s*(.*?):\s(.*)$'
         )
         
-        # Expanded system message patterns for join/exit events
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -217,20 +213,15 @@ def parse_chat_log(file_path):
             if match:
                 try:
                     timestamp_str, user, message = match.groups()
-                    
-                    # Clean the username: use our helper function to replace phone numbers
                     user = clean_member_name(user)
-                    
-                    # Use dateutil to robustly parse the timestamp
                     try:
                         parsed_date = date_parser.parse(timestamp_str, fuzzy=True)
                     except Exception:
                         parsed_date = None
-                    
                     if parsed_date is not None:
                         total_messages += 1
                         user_messages[user] += 1
-                        messages_data.append([timestamp_str, user, message])
+                        messages_data.append({'Timestamp': parsed_date, 'Member Name': user, 'Message': message})
                         global_members.add(user)
                         message_found = True
                 except Exception as e:
@@ -266,28 +257,22 @@ def display_weekly_messages_table(messages_data, global_members):
             st.write("No messages to display")
             return
         
-        df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
-        
-        # Parse timestamps using pandas defaults (which use dateutil for robustness)
+        df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
+        
+        # Compute week start (Monday) for each message
+        df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
         
         if df.empty:
             st.write("No valid messages to display")
             return
         
-        # Compute week start (Monday) for each message
-        df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
-        
-        # Determine overall range of weeks
         min_week_start = df['Week Start'].min()
         max_week_start = df['Week Start'].max()
-        
-        # Create list of Mondays from min_week_start to max_week_start
         weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
         
         rows = []
-        baseline_members = set(global_members)  # All known members
         week_counter = 1
         
         for week_start in weeks:
@@ -295,14 +280,8 @@ def display_weekly_messages_table(messages_data, global_members):
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
             
-            # Update baseline with members who messaged in this week
-            if not week_messages.empty:
-                current_week_members = set(week_messages['Member Name'].unique())
-                baseline_members = baseline_members.union(current_week_members)
-            
-            # For every member in baseline, record their message count for the week (0 if none)
-            for member in sorted(baseline_members):
-                count = week_messages[week_messages['Member Name'] == member].shape[0]
+            for member in sorted(global_members):
+                count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
                 rows.append({
                     'Week': f"Week {week_counter}",
                     'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
@@ -314,6 +293,18 @@ def display_weekly_messages_table(messages_data, global_members):
         weekly_df = pd.DataFrame(rows)
         st.markdown("### Table 1: Weekly Message Breakdown")
         st.dataframe(weekly_df)
+        
+        fig, ax = plt.subplots(figsize=(10, 5))
+        user_totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
+        if not user_totals.empty:
+            ax.bar(user_totals['Member Name'], user_totals['Number of Messages Sent'], color='skyblue')
+            ax.set_xlabel("Member Name")
+            ax.set_ylabel("Total Messages")
+            ax.set_title("Total Messages Sent by Each User")
+            plt.xticks(rotation=45, ha="right")
+            st.pyplot(fig)
+        else:
+            st.warning("No message data available to plot.")
     
     except Exception as e:
         st.error(f"Error creating weekly message table: {str(e)}")
@@ -332,7 +323,7 @@ def display_member_statistics(messages_data):
             st.write("No messages to display")
             return
         
-        df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
+        df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
         
@@ -340,23 +331,18 @@ def display_member_statistics(messages_data):
             st.write("No valid messages to display")
             return
         
-        # Group by member to compute first and last messages and total messages
         grouped = df.groupby('Member Name').agg(
             first_message=('Timestamp', 'min'),
             last_message=('Timestamp', 'max'),
             total_messages=('Message', 'count')
         ).reset_index()
         
-        # Calculate membership duration in weeks
         grouped['Longest Membership Duration (Weeks)'] = ((grouped['last_message'] - grouped['first_message']).dt.days / 7).round().astype(int)
-        
-        # Calculate average weekly messages (avoid division by zero)
         grouped['Avg. Weekly Messages'] = grouped.apply(
             lambda row: round(row['total_messages'] / max(row['Longest Membership Duration (Weeks)'], 1), 2),
             axis=1
         )
         
-        # Determine activity status: Active if last message within 30 days of overall last message
         overall_last_date = df['Timestamp'].max()
         grouped['Group Activity Status'] = grouped['last_message'].apply(
             lambda x: 'Active' if (overall_last_date - x).days <= 30 else 'Inactive'
@@ -399,4 +385,41 @@ def display_total_messages_chart(user_messages):
         st.error(f"Error creating messages chart: {str(e)}")
 
 # -------------------------------
-# Main App
+# Main App Layout
+# -------------------------------
+st.title("Structured Chat Log Analyzer")
+uploaded_file = st.file_uploader("Upload a zip file containing the chat log", type="zip")
+
+if uploaded_file:
+    chat_log_path = safe_extract_zip(uploaded_file)
+    if chat_log_path:
+        stats = parse_chat_log(chat_log_path)
+        if stats:
+            st.success("Chat log parsed successfully!")
+            
+            # Display Table 1: Weekly Message Breakdown
+            display_weekly_messages_table(stats['messages_data'], stats['global_members'])
+            
+            # Display Table 2: Member Statistics
+            display_member_statistics(stats['messages_data'])
+            
+            # Display a bar chart for total messages per user
+            display_total_messages_chart(stats['user_messages'])
+            
+            # LLM-based summary component (using aggregated data)
+            st.markdown("### LLM Summary of Chat Log")
+            if st.button("Generate Summary"):
+                with st.spinner("Analyzing chat log..."):
+                    top_users = {d['Member Name']: 0 for d in stats['messages_data']}
+                    snippet_events = stats['messages_data'][:20]
+                    prompt = (f"Summarize the chat log with these key points:\n"
+                              f"- Top message senders: {top_users}\n"
+                              f"- Sample messages (first 20): {snippet_events}\n")
+                    word_placeholder = st.empty()
+                    get_llm_reply(client, prompt, word_placeholder)
+        else:
+            st.error("Error parsing chat log.")
+    else:
+        st.error("No chat log file found in the zip archive.")
+else:
+    st.info("Please upload a zip file containing the WhatsApp chat log.")
