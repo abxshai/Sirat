@@ -55,14 +55,12 @@ def get_llm_reply(client, prompt, word_placeholder):
             stream=True,
             stop=None,
         )
-        
         response = ""
         for chunk in completion:
             delta = chunk.choices[0].delta.content or ""
             response += delta
             word_placeholder.write(response)
         return response
-    
     except Exception as e:
         st.error(f"Error generating LLM reply: {str(e)}")
         return None
@@ -97,12 +95,12 @@ def parse_chat_log_file(uploaded_file):
         messages_data = []
         global_members = set()
         
-        # Regex pattern for WhatsApp messages (optional square brackets and optional dash)
+        # Regex pattern for WhatsApp messages (accepts optional square brackets and optional dash)
         message_pattern = re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
         )
         
-        # System message patterns (join/exit events, etc.)
+        # System message patterns (for join/exit events)
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -120,7 +118,6 @@ def parse_chat_log_file(uploaded_file):
             line = line.strip()
             if not line:
                 continue
-            
             message_found = False
             match = re.match(message_pattern, line)
             if match:
@@ -161,7 +158,7 @@ def parse_chat_log_file(uploaded_file):
 def display_weekly_messages_table(messages_data, global_members):
     """
     Create Table 1: Weekly Message Breakdown.
-    For each week (Monday to Sunday), list every member (from global_members)
+    For each week (Monday to Sunday), list every member (only those who joined on or before that week)
     with their message count (or 0 if inactive).
     """
     try:
@@ -180,9 +177,18 @@ def display_weekly_messages_table(messages_data, global_members):
             st.write("No valid messages to display")
             return
         
+        # Use current week as the maximum week for the table
+        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
+        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        
         min_week_start = df['Week Start'].min()
         max_week_start = df['Week Start'].max()
-        weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
+        # Limit the weeks up to the current week
+        max_week = min(max_week_start, current_week_start)
+        weeks = pd.date_range(start=min_week_start, end=max_week, freq='W-MON')
+        
+        # For each member, compute join date as the first message they sent
+        member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
         
         rows = []
         week_counter = 1
@@ -190,7 +196,9 @@ def display_weekly_messages_table(messages_data, global_members):
             week_end = week_start + timedelta(days=6)
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
-            for member in sorted(global_members):
+            # Only include members who joined on or before the end of this week
+            eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
+            for member in sorted(eligible_members):
                 count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
                 rows.append({
                     'Week': f"Week {week_counter}",
@@ -204,7 +212,7 @@ def display_weekly_messages_table(messages_data, global_members):
         st.markdown("### Table 1: Weekly Message Breakdown")
         st.dataframe(weekly_df)
         
-        # Plot a bar chart of total messages per member
+        # Plot a bar chart of total messages per member from the weekly breakdown
         fig, ax = plt.subplots(figsize=(10, 5))
         user_totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
         if not user_totals.empty:
@@ -216,6 +224,7 @@ def display_weekly_messages_table(messages_data, global_members):
             st.pyplot(fig)
         else:
             st.warning("No message data available to plot.")
+    
     except Exception as e:
         st.error(f"Error creating weekly message table: {str(e)}")
 
@@ -224,8 +233,8 @@ def display_member_statistics(messages_data):
     Create Table 2: Member Statistics.
     For each member, show:
       - Unique Member Name
-      - Group Activity Status (Active if last message within 30 days)
-      - Longest Membership Duration (Weeks)
+      - Group Activity Status (Active if total messages > 0, otherwise Inactive)
+      - Membership Duration (Weeks) calculated from the first message until current week
       - Avg. Weekly Messages
     """
     try:
@@ -236,36 +245,32 @@ def display_member_statistics(messages_data):
         df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
-        
         if df.empty:
             st.write("No valid messages to display")
             return
         
         grouped = df.groupby('Member Name').agg(
             first_message=('Timestamp', 'min'),
-            last_message=('Timestamp', 'max'),
             total_messages=('Message', 'count')
         ).reset_index()
         
-        grouped['Longest Membership Duration (Weeks)'] = (
-            (grouped['last_message'] - grouped['first_message']).dt.days / 7
-        ).round().astype('Int64')
+        # Calculate membership duration from the first message until the current week
+        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
+        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        grouped['Membership Duration (Weeks)'] = ((current_week_start - grouped['first_message']).dt.days / 7).round().astype('Int64')
         
-        grouped['Avg. Weekly Messages'] = grouped.apply(
-            lambda row: round(row['total_messages'] / max(row['Longest Membership Duration (Weeks)'], 1), 2),
-            axis=1
-        )
+        grouped['Avg. Weekly Messages'] = grouped['total_messages'] / grouped['Membership Duration (Weeks)']
+        grouped['Avg. Weekly Messages'] = grouped['Avg. Weekly Messages'].fillna(0).round(2)
         
-        overall_last_date = df['Timestamp'].max()
-        grouped['Group Activity Status'] = grouped['last_message'].apply(
-            lambda x: 'Active' if (overall_last_date - x).days <= 30 else 'Inactive'
-        )
+        # Revised activity logic: If total_messages > 0, mark as Active, else Inactive
+        grouped['Group Activity Status'] = grouped['total_messages'].apply(lambda x: 'Active' if x > 0 else 'Inactive')
         
         grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
-        table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Longest Membership Duration (Weeks)', 'Avg. Weekly Messages']]
+        table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Membership Duration (Weeks)', 'Avg. Weekly Messages']]
         
         st.markdown("### Table 2: Member Statistics")
         st.dataframe(table2)
+    
     except Exception as e:
         st.error(f"Error creating member statistics: {str(e)}")
 
@@ -291,6 +296,7 @@ def display_total_messages_chart(user_messages):
             color='Messages'
         )
         st.plotly_chart(fig, use_container_width=True)
+    
     except Exception as e:
         st.error(f"Error creating messages chart: {str(e)}")
 
