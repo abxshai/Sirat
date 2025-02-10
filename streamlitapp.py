@@ -6,30 +6,6 @@ from collections import Counter
 from datetime import datetime, timedelta
 from groq import Groq
 
-# Custom CSS for structured layout and spacing
-st.markdown("""
-    <style>
-        .custom-table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-bottom: 20px;
-        }
-        .custom-table th, .custom-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        .custom-table th {
-            background-color: #f2f2f2;
-            font-weight: bold;
-        }
-        .chart-container {
-            margin-top: 20px;
-            margin-bottom: 40px;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
 # Initialize LLM Client
 API_KEY = st.secrets["API_KEY"]
 client = Groq(api_key=API_KEY)
@@ -37,7 +13,7 @@ client = Groq(api_key=API_KEY)
 def get_llm_reply(prompt):
     try:
         completion = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="llama-3.3-70b-versatile",
             messages=[
                {
                 "role": "system",
