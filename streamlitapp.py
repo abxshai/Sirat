@@ -13,7 +13,7 @@ def get_llm_reply(client, prompt, word_placeholder):
                     "role": "system",
                     "content": ("Analyze the chat log, and summarize key details such as "
                                 "the highest message sender, people who joined the group, "
-                                "and joining/exiting trends on a weekly or monthly basis, mention the inactive members name with a message count, take zero if none, display everything in a tabular format")
+                                "and joining/exiting trends on a weekly or monthly basis, mention the inactive members' names with a message count, take zero if none, display everything in a tabular format")
                 },
                 {
                     "role": "user",
@@ -39,27 +39,22 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def display_weekly_messages_table(messages_data, global_members):
-    # Validate messages_data
     if not messages_data:
         st.warning("No data available for weekly messages.")
         return
     
     df = pd.DataFrame(messages_data)
     
-    # Validate required columns
     required_columns = {'Timestamp', 'Member Name'}
     if not required_columns.issubset(df.columns):
         st.error(f"Error: Missing required columns: {required_columns - set(df.columns)}")
         return
     
-    # Convert 'Timestamp' to datetime
     df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
     df.dropna(subset=['Timestamp'], inplace=True)
     
-    # Compute the Week Start
-    df['Week Start'] = (df['Timestamp'] - pd.to_timedelta(df['Timestamp'].dt.weekday, unit='D')).dt.normalize()
+    df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
     
-    # Determine the range of weeks
     min_week_start = df['Week Start'].min()
     max_week_start = df['Week Start'].max()
     weeks = pd.date_range(start=min_week_start, end=max_week_start, freq='W-MON')
@@ -84,22 +79,25 @@ def display_weekly_messages_table(messages_data, global_members):
     
     weekly_df = pd.DataFrame(rows)
     
-    # Display DataFrame in Streamlit
+    if weekly_df.empty:
+        st.warning("No data available for the chart.")
+        return
+    
     st.markdown("### Weekly Message Breakdown")
     st.dataframe(weekly_df)
     
-    # Plot bar graph
     fig, ax = plt.subplots(figsize=(10, 5))
     user_totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
-    ax.bar(user_totals['Member Name'], user_totals['Number of Messages Sent'], color='skyblue')
-    ax.set_xlabel("Member Name")
-    ax.set_ylabel("Total Messages")
-    ax.set_title("Total Messages Sent by Each User")
-    plt.xticks(rotation=45, ha="right")
-    st.pyplot(fig)
+    if not user_totals.empty:
+        ax.bar(user_totals['Member Name'], user_totals['Number of Messages Sent'], color='skyblue')
+        ax.set_xlabel("Member Name")
+        ax.set_ylabel("Total Messages")
+        ax.set_title("Total Messages Sent by Each User")
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig)
+    else:
+        st.warning("No message data available to plot.")
 
-
-# Example usage
 client = Groq(api_key=st.secrets["API_KEY"])
 stats = {
     'messages_data': [
@@ -107,7 +105,7 @@ stats = {
         {'Timestamp': '2024-02-02 15:45:30', 'Member Name': 'User2', 'Message': 'How are you?'},
         {'Timestamp': '2024-02-08 09:20:15', 'Member Name': 'User1', 'Message': 'Good morning!'}
     ],
-    'global_members': ['User1', 'User2', 'User3']  # User3 is inactive, should appear with 0 messages
+    'global_members': ['User1', 'User2', 'User3']
 }
 
 display_weekly_messages_table(stats['messages_data'], stats['global_members'])
@@ -115,7 +113,7 @@ display_weekly_messages_table(stats['messages_data'], stats['global_members'])
 st.markdown("### LLM Summary of Chat Log")
 if st.button("Generate Summary"):
     with st.spinner("Analyzing chat log..."):
-        top_users = dict(stats['messages_data'][0].get('Member Name', 0) for d in stats['messages_data'])
+        top_users = {d['Member Name']: 0 for d in stats['messages_data']}
         snippet_events = stats['messages_data'][:20]
         prompt = (f"Summarize the chat log with these key points:\n"
                   f"- Top message senders: {top_users}\n"
