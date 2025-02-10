@@ -158,7 +158,7 @@ def display_weekly_messages_table(messages_data, global_members):
     """
     Create Table 1: Weekly Message Breakdown.
     For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week)
-    with their message count (or 0 if inactive) and a cumulative follower count.
+    with their message count (or 0 if inactive) and the cumulative follower count.
     """
     try:
         if not messages_data:
@@ -169,20 +169,17 @@ def display_weekly_messages_table(messages_data, global_members):
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
 
-        # Compute the Monday of the week for each message
+        # Compute the Monday for each message's week
         df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
 
         if df.empty:
             st.write("No valid messages to display")
             return
 
-        # Use the current week as the limit for the table
+        # Limit weeks up to the current week
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        # Get the Monday of the week of the earliest message
-        min_timestamp = df['Timestamp'].min()
-        first_monday = min_timestamp - timedelta(days=min_timestamp.weekday())
+        first_monday = df['Week Start'].min()
         weeks = pd.date_range(start=first_monday, end=current_week_start, freq='W-MON')
 
         # For each member, compute join date as the first message timestamp
@@ -194,9 +191,9 @@ def display_weekly_messages_table(messages_data, global_members):
             week_end = week_start + timedelta(days=6)
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
-            # Only include members who joined on or before week_end
+            # Only include members who joined on or before the end of the week
             eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
-            # Follower count is the cumulative number of eligible members for this week
+            # Follower count: cumulative count of eligible members by this week
             follower_count = len(eligible_members)
             for member in sorted(eligible_members):
                 count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
@@ -234,7 +231,7 @@ def display_member_statistics(messages_data):
     For each member, show:
       - Unique Member Name
       - Group Activity Status (Active if total messages > 0, otherwise Inactive)
-      - Membership Duration (Weeks) from first message until current week
+      - Membership Duration (Weeks) from the first message until the current week
       - Avg. Weekly Messages
     """
     try:
@@ -256,7 +253,9 @@ def display_member_statistics(messages_data):
 
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        grouped['Membership Duration (Weeks)'] = ((current_week_start - grouped['first_message']).dt.days / 7).round().astype('Int64')
+        # Calculate membership duration; clip negative values to 0
+        duration_days = (current_week_start - grouped['first_message']).dt.days.clip(lower=0)
+        grouped['Membership Duration (Weeks)'] = (duration_days / 7).round().astype('Int64')
         grouped['Avg. Weekly Messages'] = grouped.apply(
             lambda row: round(row['total_messages'] / max(row['Membership Duration (Weeks)'], 1), 2),
             axis=1
