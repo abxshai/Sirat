@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import matplotlib.pyplot as plt
-import zipfile
-import os
 import re
 import tempfile
 from collections import Counter
@@ -24,12 +22,6 @@ def clean_member_name(name):
         return "User " + digits_only[-4:]
     else:
         return cleaned
-
-# -------------------------------
-# Initialize session state for temporary directory
-# -------------------------------
-if 'temp_dir' not in st.session_state:
-    st.session_state.temp_dir = tempfile.mkdtemp()
 
 # -------------------------------
 # Custom CSS for layout and spacing
@@ -101,74 +93,24 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 # -------------------------------
-# Function to safely extract a ZIP file
+# Function to parse the chat log from a TXT file
 # -------------------------------
-def safe_extract_zip(uploaded_file):
+def parse_chat_log_file(uploaded_file):
     """
-    Safely extract the zip file to a temporary directory and return the path
-    of the most relevant chat log (.txt) file (largest file).
-    """
-    if uploaded_file is None:
-        return None
-    
-    try:
-        temp_zip_path = os.path.join(st.session_state.temp_dir, "uploaded.zip")
-        with open(temp_zip_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        extract_path = os.path.join(st.session_state.temp_dir, "extracted")
-        os.makedirs(extract_path, exist_ok=True)
-        with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
-            zip_ref.extractall(extract_path)
-        
-        # Choose the largest .txt file as the chat log
-        chat_log_path = None
-        max_size = 0
-        for root, _, files in os.walk(extract_path):
-            for file in files:
-                if file.endswith('.txt'):
-                    file_path = os.path.join(root, file)
-                    size = os.path.getsize(file_path)
-                    if size > max_size:
-                        max_size = size
-                        chat_log_path = file_path
-        return chat_log_path
-    
-    except Exception as e:
-        st.error(f"Error processing zip file: {str(e)}")
-        return None
-
-# -------------------------------
-# Function to parse the WhatsApp chat log
-# -------------------------------
-def parse_chat_log(file_path):
-    """
-    Parse a WhatsApp chat log file (TXT) with robust error handling and return aggregated data.
+    Parse a WhatsApp chat log from an uploaded TXT file.
     Returns a dictionary with:
       - messages_data: list of dicts with keys 'Timestamp', 'Member Name', 'Message'
       - user_messages: Counter of messages per user
       - global_members: Sorted list of all member names
       - join_exit_events: List of system messages (if any)
     """
-    if not file_path or not os.path.exists(file_path):
-        st.error("Chat log file not found.")
-        return None
-    
     try:
-        encodings = ['utf-8', 'latin-1', 'utf-16', 'ascii']
-        file_content = None
-        for encoding in encodings:
-            try:
-                with open(file_path, 'r', encoding=encoding) as f:
-                    file_content = f.read()
-                break
-            except UnicodeDecodeError:
-                continue
-        if file_content is None:
-            st.error("Unable to read the file with any supported encoding.")
-            return None
-        
-        chats = file_content.splitlines()
+        file_content = uploaded_file.read()
+        try:
+            text = file_content.decode("utf-8")
+        except Exception:
+            text = file_content.decode("latin-1")
+        chats = text.splitlines()
     except Exception as e:
         st.error(f"Error reading chat log: {str(e)}")
         return None
@@ -180,12 +122,12 @@ def parse_chat_log(file_path):
         messages_data = []
         global_members = set()
         
-        # Regex pattern for WhatsApp messages; accepts optional square brackets around timestamp.
+        # Regex pattern for WhatsApp messages (accepts optional square brackets around the timestamp)
         message_pattern = re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-\s*(.*?):\s(.*)$'
         )
         
-        # Patterns for system messages (join/exit events, etc.)
+        # System message patterns (join/exit events, etc.)
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -195,10 +137,7 @@ def parse_chat_log(file_path):
             r'(.+) changed this group\'s icon',
             r'Messages and calls are end-to-end encrypted',
             r'(.+) changed the group description',
-            r'(.+) changed their phone number',
-            r'You deleted this message',
-            r'(.+) created group "(.+)"',
-            r'(.+) was added by (.+)'
+            r'(.+) changed their phone number'
         ]
         system_pattern = '|'.join(system_patterns)
         
@@ -206,14 +145,12 @@ def parse_chat_log(file_path):
             line = line.strip()
             if not line:
                 continue
-            
             message_found = False
             match = re.match(message_pattern, line)
             if match:
                 try:
                     timestamp_str, user, message = match.groups()
                     user = clean_member_name(user)
-                    
                     try:
                         parsed_date = date_parser.parse(timestamp_str, fuzzy=True)
                     except Exception:
@@ -227,7 +164,6 @@ def parse_chat_log(file_path):
                 except Exception as e:
                     st.error(f"Error parsing line: {line} - {str(e)}")
                     continue
-            
             if not message_found and re.search(system_pattern, line):
                 join_exit_events.append(line)
         
@@ -274,12 +210,10 @@ def display_weekly_messages_table(messages_data, global_members):
         
         rows = []
         week_counter = 1
-        
         for week_start in weeks:
             week_end = week_start + pd.Timedelta(days=6)
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
-            
             for member in sorted(global_members):
                 count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
                 rows.append({
@@ -388,27 +322,34 @@ def display_total_messages_chart(user_messages):
 # Main App Layout
 # -------------------------------
 st.title("Structured Chat Log Analyzer")
-uploaded_file = st.file_uploader("Upload a zip file containing the WhatsApp chat log", type="zip")
+uploaded_file = st.file_uploader("Upload a TXT file containing the WhatsApp chat log", type="txt")
 
 if uploaded_file:
-    chat_log_path = safe_extract_zip(uploaded_file)
-    if chat_log_path:
-        stats = parse_chat_log(chat_log_path)
-        if stats:
-            st.success("Chat log parsed successfully!")
-            
-            # Display Table 1: Weekly Message Breakdown
-            display_weekly_messages_table(stats['messages_data'], stats['global_members'])
-            
-            # Display Table 2: Member Statistics
-            display_member_statistics(stats['messages_data'])
-            
-            # Display a bar chart for total messages per user
-            display_total_messages_chart(stats['user_messages'])
-            
-            # LLM-based summary component (using aggregated data)
-            st.markdown("### LLM Summary of Chat Log")
-            if st.button("Generate Summary"):
-                with st.spinner("Analyzing chat log..."):
-                    # Create a simple aggregation for summary; you can adjust as needed.
-                    top_users = {d['Member Name']: 0 for d in stats['messages_data']}\n  
+    stats = parse_chat_log_file(uploaded_file)
+    if stats:
+        st.success("Chat log parsed successfully!")
+        
+        # Display Table 1: Weekly Message Breakdown
+        display_weekly_messages_table(stats['messages_data'], stats['global_members'])
+        
+        # Display Table 2: Member Statistics
+        display_member_statistics(stats['messages_data'])
+        
+        # Display a bar chart for total messages per user
+        display_total_messages_chart(stats['user_messages'])
+        
+        # LLM-based summary component (using aggregated data)
+        st.markdown("### LLM Summary of Chat Log")
+        if st.button("Generate Summary"):
+            with st.spinner("Analyzing chat log..."):
+                top_users = {d['Member Name']: 0 for d in stats['messages_data']}
+                snippet_events = stats['messages_data'][:20]
+                prompt = (f"Summarize the chat log with these key points:\n"
+                          f"- Top message senders: {top_users}\n"
+                          f"- Sample messages (first 20): {snippet_events}\n")
+                word_placeholder = st.empty()
+                get_llm_reply(client, prompt, word_placeholder)
+    else:
+        st.error("Error parsing chat log.")
+else:
+    st.info("Please upload a TXT file containing the WhatsApp chat log.")
