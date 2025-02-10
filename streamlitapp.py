@@ -14,6 +14,24 @@ from groq import Groq
 from dateutil import parser as date_parser  # For robust date parsing
 
 # -------------------------------
+# Helper Function to Clean Member Names
+# -------------------------------
+def clean_member_name(name):
+    """
+    If the provided name is primarily a phone number, return a formatted string
+    using the last 4 digits. Otherwise, return the cleaned name.
+    """
+    cleaned = name.strip()
+    # Remove all non-digit characters to see how many digits there are.
+    digits_only = re.sub(r'\D', '', cleaned)
+    # If the difference between the length of the name and digits is small,
+    # assume it's a phone number (e.g., "+1234567890" or "1234567890").
+    if len(cleaned) - len(digits_only) <= 2 and len(digits_only) >= 7:
+        return "User " + digits_only[-4:]
+    else:
+        return cleaned
+
+# -------------------------------
 # Initialize session state for temporary directory
 # -------------------------------
 if 'temp_dir' not in st.session_state:
@@ -165,14 +183,12 @@ def parse_chat_log(file_path):
         messages_data = []
         global_members = set()
         
-        # Message patterns for WhatsApp export formats.
-        # This regex tries to capture: timestamp - name: message
-        # The timestamp pattern here is flexible to allow various separators.
+        # Message pattern for WhatsApp exports (flexible regex)
         message_pattern = re.compile(
             r'^(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\s*-\s*(.*?):\s(.*)$'
         )
         
-        # System message patterns (for join/exit events)
+        # System message patterns for join/exit events
         system_patterns = [
             r'(.+) added (.+)',
             r'(.+) left',
@@ -196,6 +212,9 @@ def parse_chat_log(file_path):
             if match:
                 try:
                     timestamp_str, user, message = match.groups()
+                    
+                    # Clean the username: use our helper function to replace phone numbers
+                    user = clean_member_name(user)
                     
                     # Use dateutil to robustly parse the timestamp
                     try:
@@ -240,7 +259,7 @@ def display_weekly_messages_table(messages_data, global_members):
     try:
         df = pd.DataFrame(messages_data, columns=['Timestamp', 'Member Name', 'Message'])
         
-        # Parse timestamps without a fixed format (using pandas defaults which use dateutil)
+        # Parse timestamps using pandas defaults (which use dateutil for robustness)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
         
@@ -311,7 +330,7 @@ def display_member_statistics(messages_data):
             total_messages=('Message', 'count')
         ).reset_index()
         
-        # Calculate membership duration (in weeks)
+        # Calculate membership duration in weeks
         grouped['Longest Membership Duration (Weeks)'] = ((grouped['last_message'] - grouped['first_message']).dt.days / 7).round().astype(int)
         
         # Calculate average weekly messages (avoid division by zero)
