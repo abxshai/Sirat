@@ -1,10 +1,6 @@
-streamlit 
-pandas 
-plotly.express 
-matplotlib.pyplot 
-re
-tempfile
-collections 
-datetime
-groq 
-dateutil 
+streamlit
+pandas
+plotly
+matplotlib
+groq
+python-dateutil
