@@ -64,11 +64,12 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 # -------------------------------
-# Function to parse the chat log from a TXT file
+# Caching function for parsing the chat log (to help with larger files)
 # -------------------------------
-def parse_chat_log_file(uploaded_file):
+@st.cache_data(show_spinner=True)
+def parse_chat_log_file_cached(file_bytes):
     """
-    Parse a WhatsApp chat log from an uploaded TXT file.
+    Parse a WhatsApp chat log from file bytes.
     Returns a dictionary with:
       - total_messages: total number of parsed messages
       - messages_data: list of dicts with keys 'Timestamp', 'Member Name', 'Message'
@@ -78,11 +79,7 @@ def parse_chat_log_file(uploaded_file):
       - left_dates: Dictionary mapping member name to the timestamp they left (if any)
     """
     try:
-        file_content = uploaded_file.read()
-        try:
-            text = file_content.decode("utf-8")
-        except Exception:
-            text = file_content.decode("latin-1")
+        text = file_bytes.decode("utf-8", errors="replace")
         chats = text.splitlines()
     except Exception as e:
         st.error(f"Error reading chat log: {str(e)}")
@@ -95,16 +92,27 @@ def parse_chat_log_file(uploaded_file):
     global_members = set()
     left_dates = {}
 
-    # Regex pattern for WhatsApp messages.
-    # This pattern accepts an optional leading/trailing bracket around the timestamp.
+    # Regex pattern for WhatsApp messages (optional square brackets and optional dash)
     message_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:[APap][Mm])?)\]?\s*(.*?):\s(.*)$'
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
     )
-    # Regex pattern for "left" events (e.g., '... left')
+    # Regex pattern for "left" events
     left_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:[APap][Mm])?)\]?\s*(.*?) left'
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) left'
     )
-    
+    # Other system messages (join, etc.)
+    system_patterns = [
+        r'(.+) added (.+)',
+        r'(.+) removed (.+)',
+        r'(.+) joined using this group\'s invite link',
+        r'(.+) changed the subject from "(.+)" to "(.+)"',
+        r'(.+) changed this group\'s icon',
+        r'Messages and calls are end-to-end encrypted',
+        r'(.+) changed the group description',
+        r'(.+) changed their phone number'
+    ]
+    system_pattern = '|'.join(system_patterns)
+
     # Buffer variables for multi-line messages
     current_timestamp = None
     current_user = None
@@ -115,8 +123,8 @@ def parse_chat_log_file(uploaded_file):
         if not line:
             continue
 
-        # Check if this line indicates a member left
-        left_match = left_pattern.match(line)
+        # Check for "left" events first
+        left_match = re.match(left_pattern, line)
         if left_match:
             timestamp_str, member = left_match.groups()
             member = clean_member_name(member)
@@ -125,15 +133,14 @@ def parse_chat_log_file(uploaded_file):
             except Exception:
                 left_date = None
             if left_date is not None:
-                # Store the latest left date (if multiple exist, the most recent one is used)
-                if member not in left_dates or left_date > left_dates[member]:
+                if member not in left_dates or left_date < left_dates[member]:
                     left_dates[member] = left_date
             continue
 
-        # Check if the line matches the message pattern
-        match = message_pattern.match(line)
+        # Check for message pattern
+        match = re.match(message_pattern, line)
         if match:
-            # If we have an ongoing buffered message, save it before starting a new one
+            # Save previous buffered message if any
             if current_message is not None and current_user is not None and current_timestamp is not None:
                 messages_data.append({
                     'Timestamp': current_timestamp,
@@ -153,13 +160,13 @@ def parse_chat_log_file(uploaded_file):
             current_message = message
             global_members.add(user)
         else:
-            # If the line does not match, treat it as a continuation of the previous message
+            # Continuation of a previous message
             if current_message is not None:
                 current_message += "\n" + line
             else:
                 join_exit_events.append(line)
-    
-    # Save any remaining buffered message after processing all lines
+
+    # Save any remaining buffered message
     if current_message is not None and current_user is not None and current_timestamp is not None:
         messages_data.append({
             'Timestamp': current_timestamp,
@@ -185,7 +192,7 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
     """
     Create Table 1: Weekly Message Breakdown.
     For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week and haven't left before the week ends)
-    with their message count (or 0 if inactive), the cumulative follower count (net members), and a column indicating if they left that week.
+    with their message count (or 0 if inactive), the cumulative net member count, and a column indicating if they left during that week.
     """
     try:
         if not messages_data:
@@ -194,14 +201,15 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
 
         df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df.dropna(subset=['Timestamp'], inplace=True)
-
-        # Compute the Monday for each message's week
-        df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
+        df = df.dropna(subset=['Timestamp'])
         if df.empty:
             st.write("No valid messages to display")
             return
 
+        # Compute week start (Monday) for each message
+        df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
+
+        # Limit weeks up to the current week (Monday)
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         first_monday = df['Week Start'].min()
@@ -211,21 +219,25 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
         member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
 
         rows = []
-        week_counter = 0  # Initialize counter to 0 so that the first week becomes Week 1
+        week_counter = 0  # Start at 0 so that first iteration becomes Week 1
         cumulative_added = set()
         cumulative_left = set()
 
         for week_start in weeks:
-            week_counter += 1  # Increment counter at the start of each week iteration
+            week_counter += 1
             week_end = week_start + timedelta(days=6)
+            # Eligible members: those who joined on or before week_end
             eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
             cumulative_added.update(eligible_members)
-            members_left = [m for m, left_date in left_dates.items() if left_date <= week_end]
+            # Determine members who left during this week (left date between week_start and week_end)
+            members_left = [m for m, left_date in left_dates.items() if week_start <= left_date <= week_end]
             cumulative_left.update(members_left)
             net_members = len(cumulative_added) - len(cumulative_left)
             for member in sorted(eligible_members):
-                left_this_week = left_dates[member].strftime("%d %b %Y") if member in left_dates and left_dates[member] <= week_end else ""
                 count = df[(df['Week Start'] == week_start) & (df['Member Name'] == member)].shape[0]
+                left_this_week = ""
+                if member in left_dates and week_start <= left_dates[member] <= week_end:
+                    left_this_week = left_dates[member].strftime("%d %b %Y")
                 rows.append({
                     'Week': f"Week {week_counter}",
                     'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
@@ -238,6 +250,7 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
         weekly_df = pd.DataFrame(rows)
         st.markdown("### Table 1: Weekly Message Breakdown")
         st.dataframe(weekly_df)
+        # Only one Plotly chart will be used in display_total_messages_chart.
     except Exception as e:
         st.error(f"Error creating weekly message table: {str(e)}")
 
@@ -246,7 +259,7 @@ def display_member_statistics(messages_data, left_dates):
     Create Table 2: Member Statistics.
     For each member, show:
       - Unique Member Name
-      - Group Activity Status (Active if they haven't left before the current week, otherwise Inactive)
+      - Group Activity Status (Active if the member hasn't left before current week, otherwise Inactive)
       - Membership Duration (Weeks) from first message until they left (or current week if still active)
       - Avg. Weekly Messages
     """
@@ -257,7 +270,7 @@ def display_member_statistics(messages_data, left_dates):
 
         df = pd.DataFrame(messages_data)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df.dropna(subset=['Timestamp'], inplace=True)
+        df = df.dropna(subset=['Timestamp'])
         if df.empty:
             st.write("No valid messages to display")
             return
@@ -282,8 +295,9 @@ def display_member_statistics(messages_data, left_dates):
             lambda row: round(row['total_messages'] / max(row['Membership Duration (Weeks)'], 1), 2),
             axis=1
         )
+
         grouped['Group Activity Status'] = grouped['total_messages'].apply(
-            lambda x: 'Active' if x > 0 else 'Inactive'
+            lambda m: 'Inactive' if m == 0 else ('Inactive' if (m in left_dates and left_dates[m] < current_week_start) else 'Active')
         )
 
         grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
@@ -323,7 +337,9 @@ st.title("Structured Chat Log Analyzer")
 uploaded_file = st.file_uploader("Upload a TXT file containing the WhatsApp chat log", type="txt")
 
 if uploaded_file:
-    stats = parse_chat_log_file(uploaded_file)
+    # Use caching for large files
+    file_bytes = uploaded_file.getvalue()
+    stats = parse_chat_log_file_cached(file_bytes)
     if stats:
         st.success("Chat log parsed successfully!")
         # Display Table 1: Weekly Message Breakdown
