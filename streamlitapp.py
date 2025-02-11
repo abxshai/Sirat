@@ -211,11 +211,12 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
         member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
 
         rows = []
-        week_counter = 1
+        week_counter = 0  # Initialize counter to 0 so that the first week becomes Week 1
         cumulative_added = set()
         cumulative_left = set()
 
         for week_start in weeks:
+            week_counter += 1  # Increment counter at the start of each week iteration
             week_end = week_start + timedelta(days=6)
             eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
             cumulative_added.update(eligible_members)
@@ -233,7 +234,6 @@ def display_weekly_messages_table(messages_data, global_members, left_dates):
                     'Net Member Count': net_members,
                     'Left This Week': left_this_week
                 })
-            week_counter += 1
 
         weekly_df = pd.DataFrame(rows)
         st.markdown("### Table 1: Weekly Message Breakdown")
