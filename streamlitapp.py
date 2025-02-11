@@ -76,6 +76,7 @@ def parse_chat_log_file(uploaded_file):
       - user_messages: Counter of messages per user
       - global_members: Sorted list of all member names
       - join_exit_events: List of system messages (if any)
+      - left_dates: Dictionary mapping member name to the timestamp they left (if any)
     """
     try:
         file_content = uploaded_file.read()
@@ -94,16 +95,20 @@ def parse_chat_log_file(uploaded_file):
         join_exit_events = []
         messages_data = []
         global_members = set()
-
+        left_dates = {}
+        
         # Regex pattern for WhatsApp messages (accepts optional square brackets and optional dash)
         message_pattern = re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
         )
-
-        # System message patterns (for join/exit events)
+        # Regex pattern for "left" events
+        left_pattern = re.compile(
+            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*) left'
+        )
+        # Additional system patterns (for join events, etc.)
         system_patterns = [
             r'(.+) added (.+)',
-            r'(.+) left',
+            # We already handle left events separately
             r'(.+) removed (.+)',
             r'(.+) joined using this group\'s invite link',
             r'(.+) changed the subject from "(.+)" to "(.+)"',
@@ -113,11 +118,27 @@ def parse_chat_log_file(uploaded_file):
             r'(.+) changed their phone number'
         ]
         system_pattern = '|'.join(system_patterns)
-
+        
         for line in chats:
             line = line.strip()
             if not line:
                 continue
+            
+            # First, check if it is a "left" event
+            left_match = re.match(left_pattern, line)
+            if left_match:
+                timestamp_str, member = left_match.groups()
+                member = clean_member_name(member)
+                try:
+                    left_date = date_parser.parse(timestamp_str, fuzzy=True)
+                except Exception:
+                    left_date = None
+                if left_date is not None:
+                    # Record the earliest left date for the member (if multiple left events occur, take the first)
+                    if member not in left_dates or left_date < left_dates[member]:
+                        left_dates[member] = left_date
+                continue  # Skip further processing of this line
+            
             message_found = False
             match = re.match(message_pattern, line)
             if match:
@@ -139,13 +160,14 @@ def parse_chat_log_file(uploaded_file):
                     continue
             if not message_found and re.search(system_pattern, line):
                 join_exit_events.append(line)
-
+        
         return {
             'total_messages': total_messages,
             'user_messages': user_messages,
             'join_exit_events': join_exit_events,
             'messages_data': messages_data,
-            'global_members': sorted(global_members)
+            'global_members': sorted(global_members),
+            'left_dates': left_dates
         }
     except Exception as e:
         st.error(f"Error parsing chat log data: {str(e)}")
@@ -154,10 +176,10 @@ def parse_chat_log_file(uploaded_file):
 # -------------------------------
 # Display Functions for Tables & Charts
 # -------------------------------
-def display_weekly_messages_table(messages_data, global_members):
+def display_weekly_messages_table(messages_data, global_members, left_dates):
     """
     Create Table 1: Weekly Message Breakdown.
-    For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week)
+    For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week and haven't left before the week ends)
     with their message count (or 0 if inactive) and the cumulative follower count.
     """
     try:
@@ -169,32 +191,37 @@ def display_weekly_messages_table(messages_data, global_members):
         df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
         df.dropna(subset=['Timestamp'], inplace=True)
 
-        # Compute the Monday for each message's week
+        # Compute the Monday of each message's week
         df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
-
         if df.empty:
             st.write("No valid messages to display")
             return
 
-        # Limit weeks up to the current week
+        # Use current week as limit
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        first_monday = df['Week Start'].min()
+        # Calculate the first Monday based on the earliest message
+        first_message = df['Timestamp'].min()
+        first_monday = first_message - timedelta(days=first_message.weekday())
         weeks = pd.date_range(start=first_monday, end=current_week_start, freq='W-MON')
 
-        # For each member, compute join date as the first message timestamp
+        # Compute each member's join date as the first message timestamp
         member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
 
         rows = []
         week_counter = 1
+        # Cumulative follower count: start at 0
+        cumulative_followers = set()
         for week_start in weeks:
             week_end = week_start + timedelta(days=6)
             week_mask = (df['Week Start'] == week_start)
             week_messages = df[week_mask]
-            # Only include members who joined on or before the end of the week
-            eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
-            # Follower count: cumulative count of eligible members by this week
-            follower_count = len(eligible_members)
+            # For each member, include if they joined (first message <= week_end) and have not left before week_end
+            eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end 
+                                and (m not in left_dates or left_dates[m] > week_end)]
+            # Update cumulative followers (if a member joins, they are added and remain until they leave)
+            cumulative_followers.update(eligible_members)
+            follower_count = len(cumulative_followers)
             for member in sorted(eligible_members):
                 count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
                 rows.append({
@@ -225,13 +252,13 @@ def display_weekly_messages_table(messages_data, global_members):
     except Exception as e:
         st.error(f"Error creating weekly message table: {str(e)}")
 
-def display_member_statistics(messages_data):
+def display_member_statistics(messages_data, left_dates):
     """
     Create Table 2: Member Statistics.
     For each member, show:
       - Unique Member Name
-      - Group Activity Status (Active if total messages > 0, otherwise Inactive)
-      - Membership Duration (Weeks) from the first message until the current week
+      - Group Activity Status (Active if they haven't left; if they left, then Inactive)
+      - Membership Duration (Weeks) from the first message until they left (or current week if still active)
       - Avg. Weekly Messages
     """
     try:
@@ -253,16 +280,28 @@ def display_member_statistics(messages_data):
 
         current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
         current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        # Calculate membership duration; clip negative values to 0
-        duration_days = (current_week_start - grouped['first_message']).dt.days.clip(lower=0)
-        grouped['Membership Duration (Weeks)'] = (duration_days / 7).round().astype('Int64')
+
+        def compute_membership_duration(row):
+            join_date = row['first_message']
+            member = row['Member Name']
+            if member in left_dates and left_dates[member] < current_week_start:
+                duration = (left_dates[member] - join_date).days / 7
+            else:
+                duration = (current_week_start - join_date).days / 7
+            # Prevent negative durations
+            return max(int(round(duration)), 0)
+        
+        grouped['Membership Duration (Weeks)'] = grouped.apply(compute_membership_duration, axis=1)
         grouped['Avg. Weekly Messages'] = grouped.apply(
             lambda row: round(row['total_messages'] / max(row['Membership Duration (Weeks)'], 1), 2),
             axis=1
         )
 
-        # Revised activity logic: if total_messages > 0 then Active, otherwise Inactive.
-        grouped['Group Activity Status'] = grouped['total_messages'].apply(lambda x: 'Active' if x > 0 else 'Inactive')
+        # Revised activity logic: if a member is in left_dates and left_dates[member] is before current_week_start, mark as Inactive.
+        grouped['Group Activity Status'] = grouped.apply(
+            lambda row: 'Inactive' if (row['Member Name'] in left_dates and left_dates[row['Member Name']] < current_week_start)
+            else 'Active', axis=1
+        )
 
         grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
         table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Membership Duration (Weeks)', 'Avg. Weekly Messages']]
@@ -305,9 +344,9 @@ if uploaded_file:
     if stats:
         st.success("Chat log parsed successfully!")
         # Display Table 1: Weekly Message Breakdown
-        display_weekly_messages_table(stats['messages_data'], stats['global_members'])
+        display_weekly_messages_table(stats['messages_data'], stats['global_members'], stats['left_dates'])
         # Display Table 2: Member Statistics
-        display_member_statistics(stats['messages_data'])
+        display_member_statistics(stats['messages_data'], stats['left_dates'])
         # Display a bar chart for total messages per user
         display_total_messages_chart(stats['user_messages'])
         # LLM-based summary component (using aggregated data)
