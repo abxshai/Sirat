@@ -23,32 +23,6 @@ def clean_member_name(name):
         return cleaned
 
 # -------------------------------
-# (Optional) Custom CSS for layout and spacing (can be removed)
-# -------------------------------
-st.markdown("""
-    <style>
-        .custom-table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-bottom: 20px;
-        }
-        .custom-table th, .custom-table td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        .custom-table th {
-            background-color: #f2f2f2;
-            font-weight: bold;
-        }
-        .chart-container {
-            margin-top: 20px;
-            margin-bottom: 40px;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# -------------------------------
 # Initialize LLM Client
 # -------------------------------
 API_KEY = st.secrets["API_KEY"]
@@ -96,6 +70,7 @@ def parse_chat_log_file(uploaded_file):
     """
     Parse a WhatsApp chat log from an uploaded TXT file.
     Returns a dictionary with:
+      - total_messages: total number of parsed messages
       - messages_data: list of dicts with keys 'Timestamp', 'Member Name', 'Message'
       - user_messages: Counter of messages per user
       - global_members: Sorted list of all member names
@@ -113,261 +88,99 @@ def parse_chat_log_file(uploaded_file):
         st.error(f"Error reading chat log: {str(e)}")
         return None
 
-    try:
-        total_messages = 0
-        user_messages = Counter()
-        join_exit_events = []
-        messages_data = []
-        global_members = set()
-        left_dates = {}
+    total_messages = 0
+    user_messages = Counter()
+    join_exit_events = []
+    messages_data = []
+    global_members = set()
+    left_dates = {}
 
-        # Regex pattern for WhatsApp messages (optional square brackets and optional dash)
-        message_pattern = re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
-        )
-        # Regex pattern for "left" events
-        left_pattern = re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*) left'
-        )
-        # Other system messages (join, etc.)
-        system_patterns = [
-            r'(.+) added (.+)',
-            r'(.+) removed (.+)',
-            r'(.+) joined using this group\'s invite link',
-            r'(.+) changed the subject from "(.+)" to "(.+)"',
-            r'(.+) changed this group\'s icon',
-            r'Messages and calls are end-to-end encrypted',
-            r'(.+) changed the group description',
-            r'(.+) changed their phone number'
-        ]
-        system_pattern = '|'.join(system_patterns)
+    # Regex pattern for WhatsApp messages.
+    # This pattern accepts an optional leading/trailing bracket around the timestamp.
+    message_pattern = re.compile(
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:[APap][Mm])?)\]?\s*(.*?):\s(.*)$'
+    )
+    # Regex pattern for "left" events (e.g., '... left')
+    left_pattern = re.compile(
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:[APap][Mm])?)\]?\s*(.*?) left'
+    )
+    
+    # Buffer variables for multi-line messages
+    current_timestamp = None
+    current_user = None
+    current_message = None
 
-        for line in chats:
-            line = line.strip()
-            if not line:
-                continue
+    for line in chats:
+        line = line.strip()
+        if not line:
+            continue
 
-            # Check for "left" events first
-            left_match = re.match(left_pattern, line)
-            if left_match:
-                timestamp_str, member = left_match.groups()
-                member = clean_member_name(member)
-                try:
-                    left_date = date_parser.parse(timestamp_str, fuzzy=True)
-                except Exception:
-                    left_date = None
-                if left_date is not None:
-                    # Record earliest left date if multiple exist
-                    if member not in left_dates or left_date < left_dates[member]:
-                        left_dates[member] = left_date
-                continue
+        # First, check if this line indicates a member left
+        left_match = left_pattern.match(line)
+        if left_match:
+            timestamp_str, member = left_match.groups()
+            member = clean_member_name(member)
+            try:
+                left_date = date_parser.parse(timestamp_str, fuzzy=True)
+            except Exception:
+                left_date = None
+            if left_date is not None:
+                # Store the latest left date (if multiple exist, the most recent one is used)
+                if member not in left_dates or left_date > left_dates[member]:
+                    left_dates[member] = left_date
+            continue
 
-            message_found = False
-            match = re.match(message_pattern, line)
-            if match:
-                try:
-                    timestamp_str, user, message = match.groups()
-                    user = clean_member_name(user)
-                    try:
-                        parsed_date = date_parser.parse(timestamp_str, fuzzy=True)
-                    except Exception:
-                        parsed_date = None
-                    if parsed_date is not None:
-                        total_messages += 1
-                        user_messages[user] += 1
-                        messages_data.append({'Timestamp': parsed_date, 'Member Name': user, 'Message': message})
-                        global_members.add(user)
-                        message_found = True
-                except Exception as e:
-                    st.error(f"Error parsing line: {line} - {str(e)}")
-                    continue
-            if not message_found and re.search(system_pattern, line):
+        # Check if the line matches the message pattern
+        match = message_pattern.match(line)
+        if match:
+            # If we have an ongoing buffered message, save it before starting a new one
+            if current_message is not None and current_user is not None and current_timestamp is not None:
+                messages_data.append({
+                    'Timestamp': current_timestamp,
+                    'Member Name': current_user,
+                    'Message': current_message
+                })
+                user_messages[current_user] += 1
+                total_messages += 1
+            timestamp_str, user, message = match.groups()
+            user = clean_member_name(user)
+            try:
+                parsed_date = date_parser.parse(timestamp_str, fuzzy=True)
+            except Exception:
+                parsed_date = None
+            current_timestamp = parsed_date
+            current_user = user
+            current_message = message
+            global_members.add(user)
+        else:
+            # If the line does not match, treat it as a continuation of the previous message
+            if current_message is not None:
+                current_message += "\n" + line
+            else:
+                # If no current message exists, it may be a system message
                 join_exit_events.append(line)
+    
+    # After processing all lines, save any remaining buffered message
+    if current_message is not None and current_user is not None and current_timestamp is not None:
+        messages_data.append({
+            'Timestamp': current_timestamp,
+            'Member Name': current_user,
+            'Message': current_message
+        })
+        user_messages[current_user] += 1
+        total_messages += 1
 
-        return {
-            'total_messages': total_messages,
-            'user_messages': user_messages,
-            'join_exit_events': join_exit_events,
-            'messages_data': messages_data,
-            'global_members': sorted(global_members),
-            'left_dates': left_dates
-        }
-    except Exception as e:
-        st.error(f"Error parsing chat log data: {str(e)}")
-        return None
+    return {
+        'total_messages': total_messages,
+        'user_messages': user_messages,
+        'join_exit_events': join_exit_events,
+        'messages_data': messages_data,
+        'global_members': sorted(global_members),
+        'left_dates': left_dates
+    }
 
 # -------------------------------
 # Display Functions for Tables & Charts
 # -------------------------------
 def display_weekly_messages_table(messages_data, global_members, left_dates):
-    """
-    Create Table 1: Weekly Message Breakdown.
-    For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week and haven't left before the week ends)
-    with their message count (or 0 if inactive), cumulative follower count, and an indicator if they left during that week.
-    """
-    try:
-        if not messages_data:
-            st.write("No messages to display")
-            return
-
-        df = pd.DataFrame(messages_data)
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df.dropna(subset=['Timestamp'], inplace=True)
-
-        # Compute the Monday for each message's week (using to_period('W'))
-        df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)
-        if df.empty:
-            st.write("No valid messages to display")
-            return
-
-        # Limit weeks up to the current week (Monday)
-        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
-        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        first_monday = df['Week Start'].min()
-        # Generate weeks from first_monday to current_week_start
-        weeks = pd.date_range(start=first_monday, end=current_week_start, freq='W-MON')
-
-        # Compute each member's join date (first message timestamp)
-        member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()
-
-        rows = []
-        week_counter = 1
-        cumulative_followers = set()
-        for week_start in weeks:
-            week_end = week_start + timedelta(days=6)
-            week_mask = (df['Week Start'] == week_start)
-            week_messages = df[week_mask]
-            # Eligible members: those whose join date is <= week_end
-            eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]
-            # Skip week if no eligible members to avoid empty week numbering
-            if not eligible_members:
-                continue
-            # Update cumulative followers: if a member joins in a week, they remain until they leave
-            cumulative_followers.update(eligible_members)
-            follower_count = len(cumulative_followers)
-            for member in sorted(eligible_members):
-                count = week_messages[week_messages['Member Name'] == member].shape[0] if not week_messages.empty else 0
-                # Determine if this member left during this week
-                left_this_week = ""
-                if member in left_dates:
-                    if week_start <= left_dates[member] <= week_end:
-                        left_this_week = left_dates[member].strftime("%d %b %Y")
-                rows.append({
-                    'Week': f"Week {week_counter}",
-                    'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                    'Member Name': member,
-                    'Number of Messages Sent': count,
-                    'Follower Count': follower_count,
-                    'Left This Week': left_this_week
-                })
-            week_counter += 1
-
-        weekly_df = pd.DataFrame(rows)
-        st.markdown("### Table 1: Weekly Message Breakdown")
-        st.dataframe(weekly_df)
-
-        # Plot a Plotly bar chart (only one chart)
-        totals = weekly_df.groupby('Member Name')['Number of Messages Sent'].sum().reset_index()
-        fig = px.bar(totals, x='Member Name', y='Number of Messages Sent',
-                     title='Total Messages Sent by Each User', color='Number of Messages Sent')
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Error creating weekly message table: {str(e)}")
-
-def display_member_statistics(messages_data, left_dates):
-    """
-    Create Table 2: Member Statistics.
-    For each member, show:
-      - Unique Member Name
-      - Group Activity Status (Active if they haven't left before the current week, otherwise Inactive)
-      - Membership Duration (Weeks) from first message until they left (or current week if still active)
-      - Avg. Weekly Messages
-    """
-    try:
-        if not messages_data:
-            st.write("No messages to display")
-            return
-
-        df = pd.DataFrame(messages_data)
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')
-        df.dropna(subset=['Timestamp'], inplace=True)
-        if df.empty:
-            st.write("No valid messages to display")
-            return
-
-        grouped = df.groupby('Member Name').agg(
-            first_message=('Timestamp', 'min'),
-            total_messages=('Message', 'count')
-        ).reset_index()
-
-        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())
-        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-
-        # Compute membership duration in days, and clip negative values to 0
-        duration_days = (current_week_start - grouped['first_message']).dt.days.clip(lower=0)
-        grouped['Membership Duration (Weeks)'] = (duration_days / 7).round().astype('Int64')
-        grouped['Avg. Weekly Messages'] = grouped.apply(
-            lambda row: round(row['total_messages'] / max(row['Membership Duration (Weeks)'], 1), 2),
-            axis=1
-        )
-
-        # Activity: if the member has a left date before current_week_start, mark as Inactive, else Active.
-        grouped['Group Activity Status'] = grouped['Member Name'].apply(
-            lambda m: 'Inactive' if m in left_dates and left_dates[m] < current_week_start else 'Active'
-        )
-
-        grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)
-        table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Membership Duration (Weeks)', 'Avg. Weekly Messages']]
-        st.markdown("### Table 2: Member Statistics")
-        st.dataframe(table2)
-    except Exception as e:
-        st.error(f"Error creating member statistics: {str(e)}")
-
-def display_total_messages_chart(user_messages):
-    """
-    Display a bar chart of total messages per user using Plotly Express.
-    """
-    try:
-        if not user_messages:
-            st.write("No message data to display")
-            return
-        df = pd.DataFrame(user_messages.items(), columns=['Member Name', 'Messages'])
-        if df.empty:
-            st.write("No message data to display")
-            return
-        fig = px.bar(df, x='Member Name', y='Messages',
-                     title='Total Messages Sent by Each User', color='Messages')
-        st.plotly_chart(fig, use_container_width=True)
-    except Exception as e:
-        st.error(f"Error creating messages chart: {str(e)}")
-
-# -------------------------------
-# Main App Layout
-# -------------------------------
-st.title("Structured Chat Log Analyzer")
-uploaded_file = st.file_uploader("Upload a TXT file containing the WhatsApp chat log", type="txt")
-
-if uploaded_file:
-    stats = parse_chat_log_file(uploaded_file)
-    if stats:
-        st.success("Chat log parsed successfully!")
-        # Display Table 1: Weekly Message Breakdown
-        display_weekly_messages_table(stats['messages_data'], stats['global_members'], stats['left_dates'])
-        # Display Table 2: Member Statistics
-        display_member_statistics(stats['messages_data'], stats['left_dates'])
-        # Display a bar chart for total messages per user
-        display_total_messages_chart(stats['user_messages'])
-        # LLM-based summary component (using aggregated data)
-        st.markdown("### LLM Summary of Chat Log")
-        if st.button("Generate Summary"):
-            with st.spinner("Analyzing chat log..."):
-                top_users = dict(stats['user_messages'].most_common(5))
-                prompt = (f"Summarize the chat log with these key points:\n\n"
-                          f"- Top message senders: {top_users}\n"
-                          f"- Group join and exit events: {stats['join_exit_events'][:20]}\n")
-                word_placeholder = st.empty()
-                get_llm_reply(client, prompt, word_placeholder)
-    else:
-        st.error("Error parsing chat log.")
-else:
-    st.info("Please upload a TXT file containing the WhatsApp chat log.")
+    \"\"\"\n    Create Table 1: Weekly Message Breakdown.\n    For each week (Monday to Sunday) up to the current week, list each member (only if they joined by that week and haven't left before the week ends)\n    with their message count (or 0 if inactive), the cumulative follower count (net members), and a column indicating if they left that week.\n    \"\"\"\n    try:\n        if not messages_data:\n            st.write(\"No messages to display\")\n            return\n\n        df = pd.DataFrame(messages_data)\n        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')\n        df.dropna(subset=['Timestamp'], inplace=True)\n\n        # Compute the Monday for each message's week\n        df['Week Start'] = df['Timestamp'].dt.to_period('W').apply(lambda r: r.start_time)\n        if df.empty:\n            st.write(\"No valid messages to display\")\n            return\n\n        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())\n        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)\n        first_monday = df['Week Start'].min()\n        weeks = pd.date_range(start=first_monday, end=current_week_start, freq='W-MON')\n\n        # Compute each member's join date (first message timestamp)\n        member_join_dates = df.groupby('Member Name')['Timestamp'].min().to_dict()\n\n        rows = []\n        week_counter = 1\n        cumulative_added = set()\n        cumulative_left = set()\n\n        for week_start in weeks:\n            week_end = week_start + timedelta(days=6)\n            eligible_members = [m for m, join_date in member_join_dates.items() if join_date <= week_end]\n            cumulative_added.update(eligible_members)\n            members_left = [m for m, left_date in left_dates.items() if left_date <= week_end]\n            cumulative_left.update(members_left)\n            net_members = len(cumulative_added) - len(cumulative_left)\n            for member in sorted(eligible_members):\n                left_this_week = left_dates[member].strftime(\"%d %b %Y\") if member in left_dates and left_dates[member] <= week_end else \"\"\n                count = df[(df['Week Start'] == week_start) & (df['Member Name'] == member)].shape[0]\n                rows.append({\n                    'Week': f\"Week {week_counter}\",\n                    'Week Duration': f\"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}\",\n                    'Member Name': member,\n                    'Number of Messages Sent': count,\n                    'Net Member Count': net_members,\n                    'Left This Week': left_this_week\n                })\n            week_counter += 1\n\n        weekly_df = pd.DataFrame(rows)\n        st.markdown(\"### Table 1: Weekly Message Breakdown\")\n        st.dataframe(weekly_df)\n    except Exception as e:\n        st.error(f\"Error creating weekly message table: {str(e)}\")\n\n\ndef display_member_statistics(messages_data, left_dates):\n    \"\"\"\n    Create Table 2: Member Statistics.\n    For each member, show:\n      - Unique Member Name\n      - Group Activity Status (Active if they haven't left before the current week, otherwise Inactive)\n      - Membership Duration (Weeks) from first message until they left (or current week if still active)\n      - Avg. Weekly Messages\n    \"\"\"\n    try:\n        if not messages_data:\n            st.write(\"No messages to display\")\n            return\n\n        df = pd.DataFrame(messages_data)\n        df['Timestamp'] = pd.to_datetime(df['Timestamp'], errors='coerce')\n        df.dropna(subset=['Timestamp'], inplace=True)\n        if df.empty:\n            st.write(\"No valid messages to display\")\n            return\n\n        grouped = df.groupby('Member Name').agg(\n            first_message=('Timestamp', 'min'),\n            total_messages=('Message', 'count')\n        ).reset_index()\n\n        current_week_start = datetime.now() - timedelta(days=datetime.now().weekday())\n        current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)\n\n        def compute_membership_duration(row):\n            join_date = row['first_message']\n            member = row['Member Name']\n            end_date = left_dates.get(member, current_week_start)\n            duration = (end_date - join_date).days / 7\n            return max(int(round(duration)), 0)\n\n        grouped['Membership Duration (Weeks)'] = grouped.apply(compute_membership_duration, axis=1)\n        grouped['Avg. Weekly Messages'] = grouped.apply(\n            lambda row: round(row['total_messages'] / max(row['Membership Duration (Weeks)'], 1), 2),\n            axis=1\n        )\n        grouped['Group Activity Status'] = grouped['total_messages'].apply(\n            lambda x: 'Active' if x > 0 else 'Inactive'\n        )\n\n        grouped.rename(columns={'Member Name': 'Unique Member Name'}, inplace=True)\n        table2 = grouped[['Unique Member Name', 'Group Activity Status', 'Membership Duration (Weeks)', 'Avg. Weekly Messages']]\n        st.markdown(\"### Table 2: Member Statistics\")\n        st.dataframe(table2)\n    except Exception as e:\n        st.error(f\"Error creating member statistics: {str(e)}\")\n\n\ndef display_total_messages_chart(user_messages):\n    \"\"\"\n    Display a bar chart of total messages per user using Plotly Express.\n    \"\"\"\n    try:\n        if not user_messages:\n            st.write(\"No message data to display\")\n            return\n        df = pd.DataFrame(user_messages.items(), columns=['Member Name', 'Messages'])\n        if df.empty:\n            st.write(\"No message data to display\")\n            return\n        fig = px.bar(\n            df,\n            x='Member Name',\n            y='Messages',\n            title='Total Messages Sent by Each User',\n            color='Messages'\n        )\n        st.plotly_chart(fig, use_container_width=True)\n    except Exception as e:\n        st.error(f\"Error creating messages chart: {str(e)}\")\n\n# -------------------------------\n# Main App Layout\n# -------------------------------\nst.title(\"Structured Chat Log Analyzer\")\nuploaded_file = st.file_uploader(\"Upload a TXT file containing the WhatsApp chat log\", type=\"txt\")\n\nif uploaded_file:\n    stats = parse_chat_log_file(uploaded_file)\n    if stats:\n        st.success(\"Chat log parsed successfully!\")\n        # Display Table 1: Weekly Message Breakdown\n        display_weekly_messages_table(stats['messages_data'], stats['global_members'], stats['left_dates'])\n        # Display Table 2: Member Statistics\n        display_member_statistics(stats['messages_data'], stats['left_dates'])\n        # Display a bar chart for total messages per user\n        display_total_messages_chart(stats['user_messages'])\n        # LLM-based summary component (using aggregated data)\n        st.markdown(\"### LLM Summary of Chat Log\")\n        if st.button(\"Generate Summary\"):\n            with st.spinner(\"Analyzing chat log...\"):\n                top_users = dict(stats['user_messages'].most_common(5))\n                prompt = (f\"Summarize the chat log with these key points:\\n\\n\"\n                          f\"- Top message senders: {top_users}\\n\"\n                          f\"- Group join and exit events: {stats['join_exit_events'][:20]}\\n\")\n                word_placeholder = st.empty()\n                get_llm_reply(client, prompt, word_placeholder)\n    else:\n        st.error(\"Error parsing chat log.\")\nelse:\n    st.info(\"Please upload a TXT file containing the WhatsApp chat log.\")\n```
