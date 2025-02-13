@@ -218,7 +218,7 @@ def create_weekly_breakdown(stats):
     df = pd.DataFrame(stats['messages_data'])
 
     try:
-        # Convert timestamps; remove the format parameter if your data doesn't include brackets.
+        # Convert timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
         st.error(f"Error converting timestamps: {e}")
@@ -237,16 +237,15 @@ def create_weekly_breakdown(stats):
 
     # Group by weeks starting on Monday
     for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        # Use the group key (a Timestamp) as the start of the week
         week_start = week_period
         week_end = week_start + timedelta(days=6)
         
-        message_dates = sorted(week_df.index.date.unique())
+        # Use normalize() to get a DatetimeIndex of unique dates
+        message_dates = sorted(week_df.index.normalize().unique())
 
         if message_dates:
             for current_date in message_dates:
-                # Get the first and last message times for this day within the week
-                day_msgs = week_df[week_df.index.date == current_date]
+                day_msgs = week_df[week_df.index.normalize() == current_date]
                 week_first_msg = day_msgs.index.min()
                 week_last_msg = day_msgs.index.max()
 
