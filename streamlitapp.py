@@ -217,27 +217,60 @@ def create_weekly_breakdown(stats):
 
     df = pd.DataFrame(stats['messages_data'])
 
-    # Convert to datetime, handling errors gracefully
     try:
         df['timestamp'] = pd.to_datetime(df['timestamp'], format="[%d/%m/%y, %H:%M:%S]", errors='coerce')
     except ValueError as e:
-        print(f"Error converting timestamps: {e}")  # Print for debugging
-        return pd.DataFrame()  # Or handle the error as needed
-
-    # Drop rows with NaT (Not a Time) values resulting from parsing errors
-    df.dropna(subset=['timestamp'], inplace=True)
-
-    if df.empty:  # Check if DataFrame is empty after dropping NaT
+        print(f"Error converting timestamps: {e}")
         return pd.DataFrame()
 
-    df = df.sort_values('timestamp')
+    df.dropna(subset=['timestamp'], inplace=True)
+
+    if df.empty:
+        return pd.DataFrame()
+    
+    df = df.set_index('timestamp') #CRUCIAL: Set 'timestamp' as the index
+
+    df = df.sort_index()  # Sort by index (which is now the timestamp)
 
     weekly_data = []
     week_number = 1
 
     for (week_start, week_end), week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        # ... (rest of the code remains the same)
-        return pd.DataFrame(weekly_data)
+        message_dates = sorted(week_df.index.date.unique()) #Access index for dates
+
+        if message_dates:
+            for current_date in message_dates:
+                week_first_msg = week_df[week_df.index.date == current_date].index.min() #Access index
+                week_last_msg = week_df[week_df.index.date == current_date].index.max() #Access index
+
+                week_messages = week_df[week_df.index.date == current_date].groupby('user').size().to_dict() #Access index
+                current_members = set()
+                left_members = set()
+
+                for member, status in stats['member_status'].items():
+                    if 'first_seen' in status and status['first_seen'] <= week_last_msg:
+                        current_members.add(member)
+                    if 'last_left' in status and status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
+                        current_members.discard(member)
+                        left_members.add(member)
+
+                active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
+
+                for member in sorted(current_members):
+                    messages_sent = week_messages.get(member, 0)
+                    weekly_data.append({
+                        'Week': f'Week {week_number}',
+                        'Week Duration': f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}",
+                        'Member Name': member,
+                        'Messages Sent': messages_sent,
+                        'Total Members': len(current_members),
+                        'Left Members': len(left_members),
+                        'Current Members': len(current_members) - len(left_members)
+                    })
+
+                week_number += 1
+
+    return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
