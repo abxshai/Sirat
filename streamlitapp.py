@@ -236,31 +236,34 @@ def create_weekly_breakdown(stats):
         if week_df.empty:
             continue
 
-        # Derive the actual boundaries from the messages in this group
-        week_first_msg = week_df.index.min()
-        week_last_msg = week_df.index.max()
+        # Get the actual dates where messages exist in this week
+        actual_dates = week_df.index.date.unique()
+        if len(actual_dates) == 0:
+            continue
 
-        # If all messages are from the same date, display that date only;
-        # otherwise, show the range.
-        if week_first_msg.date() == week_last_msg.date():
-            week_duration_str = week_first_msg.strftime('%d %b %Y')
+        # Create the week duration string based on actual message dates
+        if len(actual_dates) == 1:
+            week_duration_str = actual_dates[0].strftime('%d %b %Y')
         else:
-            week_duration_str = f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}"
+            week_duration_str = f"{min(actual_dates).strftime('%d %b %Y')} - {max(actual_dates).strftime('%d %b %Y')}"
 
         # Get message counts per user for this group
         week_messages = week_df.groupby('user').size().to_dict()
 
-        # Determine active and left members based on the week’s boundaries
+        # Determine active and left members based on the week's actual dates
         current_members = set()
         left_members = set()
+        week_start = min(actual_dates)
+        week_end = max(actual_dates)
+        
         for member, status in stats['member_status'].items():
-            if status['first_seen'] <= week_last_msg:
+            if status['first_seen'].date() <= week_end:
                 current_members.add(member)
-            if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
+            if status['last_left'] and week_start <= status['last_left'].date() <= week_end:
                 current_members.discard(member)
                 left_members.add(member)
 
-        # Report for each member who either sent messages or is active in this week group
+        # Report for each member who either sent messages or is active in this week
         members_to_report = sorted(set(list(week_messages.keys()) + list(current_members)))
         for member in members_to_report:
             messages_sent = week_messages.get(member, 0)
