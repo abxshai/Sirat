@@ -218,64 +218,65 @@ def create_weekly_breakdown(stats):
     df = pd.DataFrame(stats['messages_data'])
 
     try:
-        # Convert timestamps
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
         st.error(f"Error converting timestamps: {e}")
         return pd.DataFrame()
 
     df.dropna(subset=['timestamp'], inplace=True)
-
     if df.empty:
         return pd.DataFrame()
 
-    df = df.set_index('timestamp')
-    df = df.sort_index()
-
+    df = df.set_index('timestamp').sort_index()
     weekly_data = []
     week_number = 1
 
-    # Group by weeks starting on Monday
+    # Group messages by week (using Monday as the start)
     for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        week_start = week_period
-        week_end = week_start + timedelta(days=6)
-        
-        # Use normalize() to get a DatetimeIndex of unique dates
-        message_dates = sorted(week_df.index.normalize().unique())
+        if week_df.empty:
+            continue
 
-        if message_dates:
-            for current_date in message_dates:
-                day_msgs = week_df[week_df.index.normalize() == current_date]
-                week_first_msg = day_msgs.index.min()
-                week_last_msg = day_msgs.index.max()
+        # Derive the actual boundaries from the messages in this group
+        week_first_msg = week_df.index.min()
+        week_last_msg = week_df.index.max()
 
-                week_messages = day_msgs.groupby('user').size().to_dict()
-                current_members = set()
-                left_members = set()
+        # If all messages are from the same date, display that date only;
+        # otherwise, show the range.
+        if week_first_msg.date() == week_last_msg.date():
+            week_duration_str = week_first_msg.strftime('%d %b %Y')
+        else:
+            week_duration_str = f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}"
 
-                for member, status in stats['member_status'].items():
-                    if status['first_seen'] <= week_last_msg:
-                        current_members.add(member)
-                    if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
-                        current_members.discard(member)
-                        left_members.add(member)
+        # Get message counts per user for this group
+        week_messages = week_df.groupby('user').size().to_dict()
 
-                for member in sorted(current_members):
-                    messages_sent = week_messages.get(member, 0)
-                    weekly_data.append({
-                        'Week': f'Week {week_number}',
-                        'Week Duration': f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}",
-                        'Member Name': member,
-                        'Messages Sent': messages_sent,
-                        'Total Members': len(current_members),
-                        'Left Members': len(left_members),
-                        'Current Members': len(current_members) - len(left_members)
-                    })
+        # Determine active and left members based on the week’s boundaries
+        current_members = set()
+        left_members = set()
+        for member, status in stats['member_status'].items():
+            if status['first_seen'] <= week_last_msg:
+                current_members.add(member)
+            if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
+                current_members.discard(member)
+                left_members.add(member)
 
-                week_number += 1
+        # Report for each member who either sent messages or is active in this week group
+        members_to_report = sorted(set(list(week_messages.keys()) + list(current_members)))
+        for member in members_to_report:
+            messages_sent = week_messages.get(member, 0)
+            weekly_data.append({
+                'Week': f'Week {week_number}',
+                'Week Duration': week_duration_str,
+                'Member Name': member,
+                'Messages Sent': messages_sent,
+                'Total Members': len(current_members),
+                'Left Members': len(left_members),
+                'Current Members': len(current_members) - len(left_members)
+            })
+
+        week_number += 1
 
     return pd.DataFrame(weekly_data)
-
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
