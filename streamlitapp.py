@@ -1,363 +1,225 @@
-import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import re
-from collections import Counter, defaultdict
-from datetime import datetime, timedelta
-from groq import Groq
-from dateutil import parser as date_parser
+import streamlit as st
+from PIL import Image
+import helper
+import preprocessor
+import matplotlib.pyplot as plt
+import seaborn as sns
+import streamlit.components.v1 as components  # Import Streamlit
 
-def clean_member_name(name):
-    """Clean member name, format phone numbers consistently."""
-    cleaned = name.strip()
-    digits_only = re.sub(r'\D', '', cleaned)
-    if len(cleaned) - len(digits_only) <= 2 and len(digits_only) >= 7:
-        return f"User {digits_only[-4:]}"
-    return cleaned
+image1 = Image.open('download.png')
+st.sidebar.image(image1,width = 80)
+st.sidebar.title("Whatsapp Chat Analyzer")
 
-def initialize_llm_client():
-    """Initialize Groq client with API key."""
-    API_KEY = st.secrets["API_KEY"]
-    return Groq(api_key=API_KEY)
 
-def get_llm_reply(client, prompt, word_placeholder):
-    """Get LLM summary using Groq API."""
-    try:
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Analyze the chat log and summarize: most active users, "
-                        "group membership changes, and engagement patterns. "
-                        "Present in a clear, tabular format."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=1,
-            max_tokens=1024,
-            top_p=1,
-            stream=True
-        )
-        
-        response = ""
-        for chunk in completion:
-            delta = chunk.choices[0].delta.content or ""
-            response += delta
-            word_placeholder.write(response)
-        return response
-    except Exception as e:
-        st.error(f"Error generating LLM reply: {str(e)}")
-        return None
+uploaded_file = st.sidebar.file_uploader("Choose a file ")
 
-def parse_chat_log_file(uploaded_file):
-    """Parse WhatsApp chat log file."""
-    try:
-        content = uploaded_file.read()
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError:
-            text = content.decode("latin-1")
-    except Exception as e:
-        st.error(f"Error reading file: {str(e)}")
-        return None
+if uploaded_file is None:
+    key = '<p style="font-family:Roboto; color:#fff; font-size: 50px; font-weight: bold; text-align: center">Upload your chats (format : DD/MM/YY format) to view analysis</p>'
+    st.markdown(key, unsafe_allow_html = True)
 
-    # Initialize data structures
-    messages_data = []
-    user_messages = Counter()
-    member_status = {}
-    join_events = defaultdict(list)
-    left_events = defaultdict(list)
-
-    # Compile regex patterns that handle lines with or without brackets
-    # Examples:
-    # 08/03/22, 11:36:02 AM SIRAT Warriors: News & Updates …
-    # [08/03/22, 11:36:01 AM] You: You created this group
-    message_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?):\s(.*)$'
+if uploaded_file is not None:
+    bytes_data = uploaded_file.getvalue()
+    data = bytes_data.decode("utf-8")
+    df = preprocessor.preprocess(data)
+    st.dataframe(df)
+ 
+    st.download_button(
+        label="Download data as CSV",
+        data=df.to_csv(),
+        file_name='whatsapp_data_output.csv',
+        mime='text/csv',
+        help = "When You Click On Download Button Your WhatsApp Text Data Will Be Converted To Clean Downloadable CSV File"
     )
-    join_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) joined'
-    )
-    left_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) left'
-    )
+    # fetch unique user
+    user_list = df['user'].unique().tolist()
+    user_list.remove('group_notification')
+    user_list.sort()
+    user_list.insert(0, 'Overall')
 
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-
-        # Try to match a regular message first
-        msg_match = message_pattern.match(line)
-        if msg_match:
-            timestamp_str, user, message = msg_match.groups()
-            try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
-                messages_data.append({
-                    "timestamp": timestamp,
-                    "user": user,
-                    "message": message
-                })
-                user_messages[user] += 1
-                if user not in member_status:
-                    member_status[user] = {
-                        'first_seen': timestamp,
-                        'last_left': None
-                    }
-            except Exception:
-                continue
-            continue
-
-        # Check for join/left events
-        join_match = join_pattern.match(line)
-        left_match = left_pattern.match(line)
-
-        if join_match:
-            timestamp_str, user = join_match.groups()
-            try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
-                join_events[user].append(timestamp)
-                if user not in member_status:
-                    member_status[user] = {
-                        'first_seen': timestamp,
-                        'last_left': None
-                    }
-            except Exception:
-                continue
-
-        elif left_match:
-            timestamp_str, user = left_match.groups()
-            try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
-                left_events[user].append(timestamp)
-                if user in member_status:
-                    member_status[user]['last_left'] = timestamp
-            except Exception:
-                continue
-
-    current_members = sum(1 for m in member_status.values() if not m['last_left'])
+    selected_user = st.sidebar.selectbox("Show analysis wrt", user_list)
     
-    return {
-        'messages_data': messages_data,
-        'user_messages': user_messages,
-        'member_status': member_status,
-        'total_members': len(member_status),
-        'current_members': current_members
-    }
+    
+    if st.sidebar.button("Show Analysis"):
 
-def create_member_activity_table(stats):
-    """Create activity status table."""
-    activity_data = []
-    for member, status in stats['member_status'].items():
-        message_count = stats['user_messages'].get(member, 0)
-        activity_data.append({
-            'Member Name': member,
-            'Message Count': message_count,
-            'Activity Status': 'Active' if message_count > 0 else 'Inactive',
-            'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Still in group',
-            'Current Status': 'Left' if status['last_left'] else 'Present'
-        })
-    
-    return pd.DataFrame(activity_data).sort_values(
-        by=['Message Count', 'Member Name'], 
-        ascending=[False, True]
-    )
+        # Stats Area
+        num_messages, words, num_media_messages, num_links = helper.fetch_stats(selected_user, df)
 
-def create_member_timeline(stats):
-    """Create member count timeline."""
-    events = []
-    
-    for member, status in stats['member_status'].items():
-        if status['first_seen']:
-            events.append({
-                'date': status['first_seen'],
-                'change': 1,
-                'member': member
-            })
-        if status['last_left']:
-            events.append({
-                'date': status['last_left'],
-                'change': -1,
-                'member': member
-            })
-    
-    if not events:
-        return pd.DataFrame()
+        key = '<u><p style="font-family:Roboto; color:#5e76c4; font-size: 50px; font-weight: bold">Top Chat Statistics</p></u>'
+        st.markdown(key, unsafe_allow_html = True)
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            key = '<p style="font-family:Roboto; color:#12ca7d; font-size: 30px; font-weight: bold">Total Messages</p>'
+            st.markdown(key, unsafe_allow_html = True)
+            st.title(num_messages)
+        with col2:
+            key = '<p style="font-family:Roboto; color:#12ca7d; font-size: 30px; font-weight: bold">Total<br>Words</p>'
+            st.markdown(key, unsafe_allow_html = True)
+            st.title(words)
+        with col3:
+            key = '<p style="font-family:Roboto; color:#12ca7d; font-size: 30px; font-weight: bold">Media Shared</p>'
+            st.markdown(key, unsafe_allow_html = True)
+            st.title(num_media_messages)
+        with col4:
+            key = '<p style="font-family:Roboto; color:#12ca7d; font-size: 30px; font-weight: bold">Linked Shared</p>'
+            st.markdown(key, unsafe_allow_html = True)
+            st.title(num_links)
+
+        # monthly timeline
+        timeline = helper.monthly_timeline(selected_user, df)
+        monthly_time = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Monthly Timeline</p></u>'
+        st.markdown(monthly_time, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:Roboto fax; color:#ffa81a; font-size: 15px; font-weight: bold">This status shows total number of chats per month in group or personal.</p>',unsafe_allow_html=True)
+        fig, ax = plt.subplots(figsize = (10,4))
+        plt.plot(timeline['time'], timeline['message'], color='green', linewidth = 3.0)
+        plt.title("Monthly Chats")
+        plt.xlabel("Months")
+        plt.ylabel("Number of chats")
+        plt.xticks(rotation='vertical')
+        for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+        st.pyplot(fig)
         
-    events.sort(key=lambda x: x['date'])
-    date_range = pd.date_range(
-        start=events[0]['date'].date(),
-        end=events[-1]['date'].date() + timedelta(days=1),
-        freq='D'
-    )
-    
-    member_count = 0
-    daily_counts = []
-    
-    for date in date_range:
-        day_events = [e for e in events if e['date'].date() == date.date()]
-        for event in day_events:
-            member_count += event['change']
+
+        # daily timeline
+        daily_timeline = helper.daily_timeline(selected_user, df)
+        daily_time = '<br><br><u><p style="font-family:georgia; color:#ca124d; font-size: 40px; font-weight: bold">Daily Timeline</p></u>'
+        st.markdown(daily_time, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:lucida fax; color:#ffa81a; font-size: 15px; font-weight: bold">This stats shows total number of chats per day in group or personal.</p>',unsafe_allow_html=True)
+        fig, ax = plt.subplots(figsize = (10,4))
+        plt.plot(daily_timeline['only_date'], daily_timeline['message'], color='red', linewidth = 2.5)
+        plt.title("No. of chats per month")
+        plt.xlabel("Days")
+        plt.ylabel("Number of chats")
+        plt.xticks(rotation='vertical')
+        for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+        st.pyplot(fig)
+
+        # weekly activity
+        activity_map = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Activity Map</p></u>'
+        st.markdown(activity_map, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:Roboto fax; color:#ffa81a; font-size: 15px; font-weight: bold">This stats shows which day and month of your chats are busy</p>',unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+
+        with col1:
+            most_busy_day = '<p style="font-family:georgia; color:#12ca7d; font-size: 30px; font-weight: bold">Most Busy Day</p>'
+            st.markdown(most_busy_day, unsafe_allow_html = True)
+            busy_day = helper.week_activity_map(selected_user, df)
+            fig, ax = plt.subplots()
+            ax.bar(busy_day.index, busy_day.values,color = 'pink')
+            plt.xticks(rotation='vertical')
+            plt.title("Most busy day in a week")
+            plt.xlabel("Days")
+            plt.ylabel("Number of chats")
+            for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+            st.pyplot(fig)
+
+        with col2:
+            most_busy_month = '<p style="font-family:Roboto; color:#12ca7d; font-size: 30px; font-weight: bold">Most Busy Month</p>'
+            st.markdown(most_busy_month, unsafe_allow_html = True)
+            busy_month = helper.month_activity_map(selected_user, df)
+            fig, ax = plt.subplots()
+            ax.bar(busy_month.index, busy_month.values, color='purple')
+            plt.xticks(rotation='vertical')
+            plt.title("Most busy month")
+            plt.xlabel("Months")
+            plt.ylabel("Number of chats")
+            for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+            st.pyplot(fig)
+
+        # Weekly hours' activity map
+        weekly_hours_activity_map = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Weekly Hours Activity Map</p></u>'
+        st.markdown(weekly_hours_activity_map, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:Roboto fax; color:#ffa81a; font-size: 15px; font-weight: bold">This map shows the active hours of the  group across the week</p>',unsafe_allow_html=True)
+        user_heatmap = helper.activity_heatmap(selected_user, df)
+        fig, ax = plt.subplots(figsize= (8,4))
+        ax = sns.heatmap(user_heatmap)
+        plt.title("Weekly Hours Activity Map")
+        plt.xlabel("Time")
+        plt.ylabel("Number of chats")
+        for axis in ['top','bottom','left','right']:
+            ax.spines[axis].set_linewidth(3)
+            ax.spines[axis].set_color("orange")
+            ax.spines[axis].set_zorder(5)
+        st.pyplot(fig)
+
+        # finding the busiest users in the group(Group level)
+        if selected_user == 'Overall':
+            most_busy_user = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Most Busy Users</p></u>'
+            st.markdown(most_busy_user, unsafe_allow_html = True)
+            st.markdown('<p style="font-family:Roboto; color:#ffa81a; font-size: 15px; font-weight: bold">This stats shows who is the most busy user in the group</p>',unsafe_allow_html=True)
+            x, new_df = helper.most_busy_users(df)
+            fig, ax = plt.subplots(figsize= (8,5))
+
+            # col1, col2 = st.columns(2)
+
+            # with col1:
+            ax.bar(x.index, x.values, color='cyan')
+            plt.xticks(rotation='vertical')
+            plt.title("Monthly Timeline")
+            plt.xlabel("users")
+            plt.ylabel("Number")
+            for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+            st.pyplot(fig)
+            # with col2:
+                # st.dataframe(new_df)
+
+        # Word Cloud
+
+        word_cloud = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Word Cloud</p></u>'
+        st.markdown(word_cloud, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:Roboto; color:#ffa81a; font-size: 15px; font-weight: bold">This image shows frequently used words in the chats by user or a group</p>',unsafe_allow_html=True)
+        df_wc = helper.create_worldcloud(selected_user, df)
+        fig, ax = plt.subplots(figsize = (8,4))
+        ax.imshow(df_wc)
+        plt.title("Word Cloud")
+        for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+        st.pyplot(fig)
+
+        # most common words
         
-        daily_counts.append({
-            'Date': date,
-            'Member Count': member_count
-        })
+        most_used_words = '<br><br><u><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">Most used words</p></u>'
+        st.markdown(most_used_words, unsafe_allow_html = True)
+        st.markdown('<p style="font-family:Roboto fax; color:#ffa81a; font-size: 15px; font-weight: bold">This stats show most used words in the chats.</p>',unsafe_allow_html=True)
+        most_common_df = helper.most_common_words(selected_user, df)
+
+        fig, ax = plt.subplots(figsize= (8,4))
+
+        ax.bar(most_common_df[0], most_common_df[1],color="brown")
+        plt.xticks(rotation='vertical')
+        plt.title("Most words used")
+        plt.xlabel("Total no. of words")
+        plt.ylabel("Words")
+        for axis in ['top','bottom','left','right']:
+                ax.spines[axis].set_linewidth(3)
+                ax.spines[axis].set_color("orange")
+                ax.spines[axis].set_zorder(5)
+        st.pyplot(fig)
+
+   
+st.sidebar.markdown('<br><br>', unsafe_allow_html=True)
+
+if st.sidebar.button("About us"):
+    st.title('Creator : ')
+    key = '<br><p style="font-family:Roboto; color:#ca124d; font-size: 40px; font-weight: bold">HETANSI PATEL</p>'
+    st.markdown(key, unsafe_allow_html = True)
+    st.markdown('<p style="font-family:Roboto; color:blue; font-size: 25px; font-weight: bold">Id : 20DIT056 <br> From : Charotar University of Science and Technology<br> Python Project</p>',unsafe_allow_html = True)
     
-    return pd.DataFrame(daily_counts)
-
-def create_weekly_breakdown(stats):
-    if not stats['messages_data']:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(stats['messages_data'])
-
-    try:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    except ValueError as e:
-        st.error(f"Error converting timestamps: {e}")
-        return pd.DataFrame()
-
-    df.dropna(subset=['timestamp'], inplace=True)
-    if df.empty:
-        return pd.DataFrame()
-
-    # Sort messages by timestamp
-    df = df.sort_values('timestamp')
-    
-    weekly_data = []
-    current_date = None
-    messages_on_date = []
-    week_number = 1
-
-    # Process messages date by date
-    for index, row in df.iterrows():
-        message_date = row['timestamp'].date()
-        
-        # If we're on a new date
-        if message_date != current_date:
-            # Process the previous date's messages if any
-            if messages_on_date:
-                user_messages = {}
-                for msg in messages_on_date:
-                    user = msg['user']
-                    user_messages[user] = user_messages.get(user, 0) + 1
-
-                # Add data for each active user with date formatted as dd/mm/yy
-                for user, count in user_messages.items():
-                    weekly_data.append({
-                        'Week': f'Week {week_number}',
-                        'Week Duration': current_date.strftime('%d/%m/%y'),
-                        'Member Name': user,
-                        'Messages Sent': count
-                    })
-                
-                week_number += 1
-                messages_on_date = []
-            
-            current_date = message_date
-
-        # Add current message to the current date's collection
-        messages_on_date.append({
-            'user': row['user'],
-            'timestamp': row['timestamp']
-        })
-
-    # Process the last date's messages
-    if messages_on_date:
-        user_messages = {}
-        for msg in messages_on_date:
-            user = msg['user']
-            user_messages[user] = user_messages.get(user, 0) + 1
-
-        for user, count in user_messages.items():
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': current_date.strftime('%d/%m/%y'),
-                'Member Name': user,
-                'Messages Sent': count
-            })
-    
-    return pd.DataFrame(weekly_data)
-
-def main():
-    st.title("Enhanced Chat Log Analyzer")
-    
-    uploaded_file = st.file_uploader("Upload WhatsApp chat log (TXT format)", type="txt")
-    
-    if uploaded_file:
-        with st.spinner("Parsing chat log..."):
-            stats = parse_chat_log_file(uploaded_file)
-        
-        if stats:
-            st.success(f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}")
-            
-            # Group Member Count Timeline
-            st.markdown("### Group Member Count Over Time")
-            timeline_df = create_member_timeline(stats)
-            if not timeline_df.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=timeline_df['Date'],
-                    y=timeline_df['Member Count'],
-                    mode='lines',
-                    name='Member Count',
-                    line=dict(color='#2E86C1', width=2)
-                ))
-                fig.update_layout(
-                    title='Group Member Count Timeline',
-                    xaxis_title='Date',
-                    yaxis_title='Number of Members',
-                    hovermode='x unified',
-                    xaxis=dict(showgrid=True),
-                    yaxis=dict(showgrid=True)
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Member Activity Table
-            st.markdown("### Member Activity Status")
-            activity_df = create_member_activity_table(stats)
-            st.dataframe(activity_df, use_container_width=True)
-            
-            # Activity statistics
-            active_count = len(activity_df[activity_df['Activity Status'] == 'Active'])
-            inactive_count = len(activity_df[activity_df['Activity Status'] == 'Inactive'])
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Active Members", active_count)
-            with col2:
-                st.metric("Inactive Members", inactive_count)
-            
-            # Weekly Message & Member Analysis Table
-            st.markdown("### Weekly Message & Member Analysis")
-            weekly_df = create_weekly_breakdown(stats)
-            st.dataframe(weekly_df)
-            
-            # Message Distribution using Streamlit chart
-            st.markdown("### Message Distribution")
-            message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
-            st.bar_chart(message_df.set_index('Member'))
-            
-            # LLM Summary Section (if needed)
-            st.markdown("### Chat Analysis Summary")
-            if st.button("Generate Summary"):
-                client = initialize_llm_client()
-                prompt = (f"Analyze this chat log:\n"
-                          f"- Total members: {stats['total_members']}\n"
-                          f"- Current members: {stats['current_members']}\n"
-                          f"- Active members: {active_count}\n"
-                          f"- Inactive members: {inactive_count}\n"
-                          f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
-                word_placeholder = st.empty()
-                get_llm_reply(client, prompt, word_placeholder)
-
-if __name__ == "__main__":
-    main()
