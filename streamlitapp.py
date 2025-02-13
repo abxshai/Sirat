@@ -237,8 +237,7 @@ def create_weekly_breakdown(stats):
 
     for (week_start, week_end), week_df in df.groupby(pd.Grouper(freq='W-MON')):
         # ... (rest of the code remains the same)
-
-    return pd.DataFrame(weekly_data)
+        return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
