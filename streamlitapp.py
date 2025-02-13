@@ -278,8 +278,7 @@ def create_weekly_breakdown(stats):
             })
 
         week_number += 1
-
-    return pd.DataFrame(weekly_data)
+        return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
