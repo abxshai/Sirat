@@ -214,33 +214,79 @@ def create_member_timeline(stats):
     
     return pd.DataFrame(daily_counts)
 
-def create_weekly_message_analysis(stats):
-    """
-    Create the Weekly Message & Member Analysis table.
-    This table exactly parses the date (as it appears in the chat log),
-    the sender's name, and counts the messages sent on that date.
-    The resulting table has three columns:
-      - Date (in the format dd/mm/yy)
-      - Member Name
-      - Messages Sent
-    """
+def create_weekly_breakdown(stats):
     if not stats['messages_data']:
         return pd.DataFrame()
 
     df = pd.DataFrame(stats['messages_data'])
-    # Ensure timestamps are in datetime format
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+
+    try:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    except ValueError as e:
+        st.error(f"Error converting timestamps: {e}")
+        return pd.DataFrame()
+
     df.dropna(subset=['timestamp'], inplace=True)
+    if df.empty:
+        return pd.DataFrame()
 
-    # Extract the date exactly as seen in the chat log (e.g. "08/03/22")
-    df['Date'] = df['timestamp'].dt.strftime('%d/%m/%y')
+    # Sort messages by timestamp
+    df = df.sort_values('timestamp')
+    
+    weekly_data = []
+    current_date = None
+    messages_on_date = []
+    week_number = 1
 
-    # Group by date and sender, and count messages
-    analysis = df.groupby(['Date', 'user']).size().reset_index(name='Messages Sent')
-    analysis.rename(columns={'user': 'Member Name'}, inplace=True)
-    analysis.sort_values(['Date', 'Member Name'], inplace=True)
-    return analysis
+    # Process messages date by date
+    for index, row in df.iterrows():
+        message_date = row['timestamp'].date()
+        
+        # If we're on a new date
+        if message_date != current_date:
+            # Process the previous date's messages if any
+            if messages_on_date:
+                user_messages = {}
+                for msg in messages_on_date:
+                    user = msg['user']
+                    user_messages[user] = user_messages.get(user, 0) + 1
 
+                # Add data for each active user
+                for user, count in user_messages.items():
+                    weekly_data.append({
+                        'Week': f'Week {week_number}',
+                        'Week Duration': current_date.strftime('%d %b %Y'),
+                        'Member Name': user,
+                        'Messages Sent': count
+                    })
+                
+                week_number += 1
+                messages_on_date = []
+            
+            current_date = message_date
+
+        # Add current message to the current date's collection
+        messages_on_date.append({
+            'user': row['user'],
+            'timestamp': row['timestamp']
+        })
+
+    # Process the last date's messages
+    if messages_on_date:
+        user_messages = {}
+        for msg in messages_on_date:
+            user = msg['user']
+            user_messages[user] = user_messages.get(user, 0) + 1
+
+        for user, count in user_messages.items():
+            weekly_data.append({
+                'Week': f'Week {week_number}',
+                'Week Duration': current_date.strftime('%d %b %Y'),
+                'Member Name': user,
+                'Messages Sent': count
+            })
+
+    return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
