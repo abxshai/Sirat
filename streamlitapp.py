@@ -237,12 +237,12 @@ def create_weekly_breakdown(stats):
             continue
 
         # Get the actual dates where messages exist in this week
-        actual_dates = week_df.index.date.unique()
+        actual_dates = pd.to_datetime(week_df.index).date
         if len(actual_dates) == 0:
             continue
 
         # Create the week duration string based on actual message dates
-        if len(actual_dates) == 1:
+        if len(set(actual_dates)) == 1:
             week_duration_str = actual_dates[0].strftime('%d %b %Y')
         else:
             week_duration_str = f"{min(actual_dates).strftime('%d %b %Y')} - {max(actual_dates).strftime('%d %b %Y')}"
@@ -278,7 +278,8 @@ def create_weekly_breakdown(stats):
             })
 
         week_number += 1
-        return pd.DataFrame(weekly_data)
+
+    return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
