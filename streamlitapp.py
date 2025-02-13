@@ -212,78 +212,46 @@ def create_member_timeline(stats):
     return pd.DataFrame(daily_counts)
 
 def create_weekly_breakdown(stats):
-    """Create weekly message breakdown using fixed calendar weeks (Monday to Sunday)
-    and clip the week duration to the actual chat log date range."""
-    if not stats['messages_data']:
-        return pd.DataFrame()
+    # ... (rest of the function is the same up to the groupby)
 
-    # Create DataFrame, sort by timestamp, and set the index for grouping
-    df = pd.DataFrame(stats['messages_data'])
-    df = df.sort_values('timestamp')
-    df.set_index('timestamp', inplace=True)
-    
-    # Calculate the actual minimum and maximum dates from the chat log
-    min_date = df.index.min()
-    max_date = df.index.max()
-    
-    # Group messages by fixed calendar weeks (using Monday as the grouping anchor)
-    weekly_groups = df.groupby(pd.Grouper(freq='W-MON'))
-    
-    weekly_data = []
-    week_number = 1
-    for group_start, group_df in weekly_groups:
-        if group_df.empty:
-            continue
-        
-        # Calculate the full period for this group (Monday to Sunday)
-        period_start = group_start
-        period_end = group_start + timedelta(days=6)
-        # Clip the boundaries to the actual chat log dates
-        week_start = max(period_start, min_date)
-        week_end = min(period_end, max_date)
-        
-        # Determine the week's messages and their counts per user
-        week_messages = group_df.groupby('user').size().to_dict()
-        
-        # Update member status for this week using week_end as cutoff
+    for (week_start, week_end), week_df in df.groupby(['week_start', 'week_end']):
+        # Clip week end to the max date from the chat
+        week_end = min(week_end, df['timestamp'].max())
+        week_start = max(week_start, df['timestamp'].min())
+
+        week_messages = week_df.groupby('user').size().to_dict()
         current_members = set()
         left_members = set()
+
+        # Efficiently update member status using boolean indexing
         for member, status in stats['member_status'].items():
             if status['first_seen'] <= week_end:
                 current_members.add(member)
             if status['last_left'] and week_start <= status['last_left'] <= week_end:
-                if member in current_members:
-                    current_members.discard(member)
+                current_members.discard(member)
                 left_members.add(member)
-        
-        # Identify active members for this week
-        active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
-        
-        # Add entries for active members
-        for member in sorted(active_members_this_week):
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Messages Sent': week_messages.get(member, 0),
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
-            })
-        
-        # Add entries for inactive members
-        for member in sorted(current_members - active_members_this_week):
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Messages Sent': 0,
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
-            })
-        
-        week_number += 1
+
+        if not week_df.empty:
+            # Correctly get the first and last message timestamps for the week
+            week_first_msg = week_df['timestamp'].min()
+            week_last_msg = week_df['timestamp'].max()
+
+            active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
+
+            for member in sorted(current_members):  # Iterate through ALL current members
+                messages_sent = week_messages.get(member, 0)
+                weekly_data.append({
+                    'Week': f'Week {week_number}',
+                    # Use week_first_msg and week_last_msg here
+                    'Week Duration': f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}",
+                    'Member Name': member,
+                    'Messages Sent': messages_sent,
+                    'Total Members': len(current_members),
+                    'Left Members': len(left_members),
+                    'Current Members': len(current_members) - len(left_members)
+                })
+
+            week_number += 1
 
     return pd.DataFrame(weekly_data)
 
