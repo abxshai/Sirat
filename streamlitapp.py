@@ -215,25 +215,73 @@ def create_weekly_breakdown(stats):
     if not stats['messages_data']:
         return pd.DataFrame()
 
-    # Create DataFrame from messages data
     df = pd.DataFrame(stats['messages_data'])
-    
-    # Convert timestamps and sort
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    try:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    except ValueError as e:
+        st.error(f"Error converting timestamps: {e}")
+        return pd.DataFrame()
+
+    df.dropna(subset=['timestamp'], inplace=True)
+    if df.empty:
+        return pd.DataFrame()
+
+    # Sort messages by timestamp
     df = df.sort_values('timestamp')
     
     weekly_data = []
-    message_number = 1
-    
-    # Process each message individually
-    for _, row in df.iterrows():
-        weekly_data.append({
-            'Week': f'Message {message_number}',
-            'Week Duration': row['timestamp'].strftime('%d %b %Y'),  # Just the date of the message
-            'Member Name': row['user'],
-            'Messages Sent': 1  # Each entry represents one message
+    current_date = None
+    messages_on_date = []
+    week_number = 1
+
+    # Process messages date by date
+    for index, row in df.iterrows():
+        message_date = row['timestamp'].date()
+        
+        # If we're on a new date
+        if message_date != current_date:
+            # Process the previous date's messages if any
+            if messages_on_date:
+                user_messages = {}
+                for msg in messages_on_date:
+                    user = msg['user']
+                    user_messages[user] = user_messages.get(user, 0) + 1
+
+                # Add data for each active user
+                for user, count in user_messages.items():
+                    weekly_data.append({
+                        'Week': f'Week {week_number}',
+                        'Week Duration': current_date.strftime('%d %b %Y'),
+                        'Member Name': user,
+                        'Messages Sent': count
+                    })
+                
+                week_number += 1
+                messages_on_date = []
+            
+            current_date = message_date
+
+        # Add current message to the current date's collection
+        messages_on_date.append({
+            'user': row['user'],
+            'timestamp': row['timestamp']
         })
-        message_number += 1
+
+    # Process the last date's messages
+    if messages_on_date:
+        user_messages = {}
+        for msg in messages_on_date:
+            user = msg['user']
+            user_messages[user] = user_messages.get(user, 0) + 1
+
+        for user, count in user_messages.items():
+            weekly_data.append({
+                'Week': f'Week {week_number}',
+                'Week Duration': current_date.strftime('%d %b %Y'),
+                'Member Name': user,
+                'Messages Sent': count
+            })
 
     return pd.DataFrame(weekly_data)
 def main():
