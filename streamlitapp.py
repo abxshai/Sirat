@@ -218,9 +218,10 @@ def create_weekly_breakdown(stats):
     df = pd.DataFrame(stats['messages_data'])
 
     try:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], format="[%d/%m/%y, %H:%M:%S]", errors='coerce')
+        # Convert timestamps; remove the format parameter if your data doesn't include brackets.
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
-        print(f"Error converting timestamps: {e}")
+        st.error(f"Error converting timestamps: {e}")
         return pd.DataFrame()
 
     df.dropna(subset=['timestamp'], inplace=True)
@@ -234,29 +235,31 @@ def create_weekly_breakdown(stats):
     weekly_data = []
     week_number = 1
 
-    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')): #Correct Grouping
-        week_start = week_period.start_time #Extract start and end times
-        week_end = week_period.end_time
+    # Group by weeks starting on Monday
+    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
+        # Use the group key (a Timestamp) as the start of the week
+        week_start = week_period
+        week_end = week_start + timedelta(days=6)
         
         message_dates = sorted(week_df.index.date.unique())
 
         if message_dates:
             for current_date in message_dates:
-                week_first_msg = week_df[week_df.index.date == current_date].index.min()
-                week_last_msg = week_df[week_df.index.date == current_date].index.max()
+                # Get the first and last message times for this day within the week
+                day_msgs = week_df[week_df.index.date == current_date]
+                week_first_msg = day_msgs.index.min()
+                week_last_msg = day_msgs.index.max()
 
-                week_messages = week_df[week_df.index.date == current_date].groupby('user').size().to_dict()
+                week_messages = day_msgs.groupby('user').size().to_dict()
                 current_members = set()
                 left_members = set()
 
                 for member, status in stats['member_status'].items():
-                    if 'first_seen' in status and status['first_seen'] <= week_last_msg:
+                    if status['first_seen'] <= week_last_msg:
                         current_members.add(member)
-                    if 'last_left' in status and status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
+                    if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
                         current_members.discard(member)
                         left_members.add(member)
-
-                active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
 
                 for member in sorted(current_members):
                     messages_sent = week_messages.get(member, 0)
@@ -273,6 +276,7 @@ def create_weekly_breakdown(stats):
                 week_number += 1
 
     return pd.DataFrame(weekly_data)
+
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
@@ -332,10 +336,10 @@ def main():
             # Message distribution
             st.markdown("### Message Distribution")
             message_df = pd.DataFrame(list(stats['user_messages'].items()), 
-                                    columns=['Member', 'Messages'])
+                                      columns=['Member', 'Messages'])
             fig = px.bar(message_df, x='Member', y='Messages',
-                        title='Messages per Member',
-                        color='Messages')
+                         title='Messages per Member',
+                         color='Messages')
             st.plotly_chart(fig, use_container_width=True)
             
             # LLM Summary
@@ -343,11 +347,11 @@ def main():
             if st.button("Generate Summary"):
                 client = initialize_llm_client()
                 prompt = (f"Analyze this chat log:\n"
-                         f"- Total members: {stats['total_members']}\n"
-                         f"- Current members: {stats['current_members']}\n"
-                         f"- Active members: {active_count}\n"
-                         f"- Inactive members: {inactive_count}\n"
-                         f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
+                          f"- Total members: {stats['total_members']}\n"
+                          f"- Current members: {stats['current_members']}\n"
+                          f"- Active members: {active_count}\n"
+                          f"- Inactive members: {inactive_count}\n"
+                          f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
                 word_placeholder = st.empty()
                 get_llm_reply(client, prompt, word_placeholder)
 
