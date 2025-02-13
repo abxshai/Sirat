@@ -7,14 +7,6 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from groq import Groq
 from dateutil import parser as date_parser
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-
-##############################
-# Basic Functions & Preprocessing
-##############################
 
 def clean_member_name(name):
     """Clean member name, format phone numbers consistently."""
@@ -73,19 +65,25 @@ def parse_chat_log_file(uploaded_file):
         st.error(f"Error reading file: {str(e)}")
         return None
 
+    # Initialize data structures
     messages_data = []
     user_messages = Counter()
     member_status = {}
-    # Patterns for messages, join, and left events
-    message_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
-    )
+    join_events = defaultdict(list)
+    left_events = defaultdict(list)
 
+    # Compile regex patterns that handle lines with or without brackets
+    # Examples:
+    # 08/03/22, 11:36:02 AM SIRAT Warriors: News & Updates …
+    # [08/03/22, 11:36:01 AM] You: You created this group
+    message_pattern = re.compile(
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?):\s(.*)$'
+    )
     join_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) joined'
     )
     left_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) left'
+        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) left'
     )
 
     for line in text.splitlines():
@@ -93,7 +91,7 @@ def parse_chat_log_file(uploaded_file):
         if not line:
             continue
 
-        # Standard messages
+        # Try to match a regular message first
         msg_match = message_pattern.match(line)
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
@@ -107,12 +105,15 @@ def parse_chat_log_file(uploaded_file):
                 })
                 user_messages[user] += 1
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'last_left': None}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'last_left': None
+                    }
             except Exception:
                 continue
             continue
 
-        # Group join/left events (if any)
+        # Check for join/left events
         join_match = join_pattern.match(line)
         left_match = left_pattern.match(line)
 
@@ -121,21 +122,28 @@ def parse_chat_log_file(uploaded_file):
             try:
                 timestamp = date_parser.parse(timestamp_str, fuzzy=True)
                 user = clean_member_name(user)
+                join_events[user].append(timestamp)
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'last_left': None}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'last_left': None
+                    }
             except Exception:
                 continue
+
         elif left_match:
             timestamp_str, user = left_match.groups()
             try:
                 timestamp = date_parser.parse(timestamp_str, fuzzy=True)
                 user = clean_member_name(user)
+                left_events[user].append(timestamp)
                 if user in member_status:
                     member_status[user]['last_left'] = timestamp
             except Exception:
                 continue
 
     current_members = sum(1 for m in member_status.values() if not m['last_left'])
+    
     return {
         'messages_data': messages_data,
         'user_messages': user_messages,
@@ -144,12 +152,8 @@ def parse_chat_log_file(uploaded_file):
         'current_members': current_members
     }
 
-##############################
-# Analysis Functions
-##############################
-
 def create_member_activity_table(stats):
-    """Create a table of member activity."""
+    """Create activity status table."""
     activity_data = []
     for member, status in stats['member_status'].items():
         message_count = stats['user_messages'].get(member, 0)
@@ -162,149 +166,141 @@ def create_member_activity_table(stats):
             'Current Status': 'Left' if status['last_left'] else 'Present'
         })
     
-    return pd.DataFrame(activity_data).sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
+    return pd.DataFrame(activity_data).sort_values(
+        by=['Message Count', 'Member Name'], 
+        ascending=[False, True]
+    )
 
 def create_member_timeline(stats):
-    """Create a timeline of group member count over time."""
+    """Create member count timeline."""
     events = []
+    
     for member, status in stats['member_status'].items():
         if status['first_seen']:
-            events.append({'date': status['first_seen'], 'change': 1})
+            events.append({
+                'date': status['first_seen'],
+                'change': 1,
+                'member': member
+            })
         if status['last_left']:
-            events.append({'date': status['last_left'], 'change': -1})
+            events.append({
+                'date': status['last_left'],
+                'change': -1,
+                'member': member
+            })
+    
     if not events:
         return pd.DataFrame()
+        
     events.sort(key=lambda x: x['date'])
-    date_range = pd.date_range(start=events[0]['date'].date(), end=events[-1]['date'].date() + timedelta(days=1), freq='D')
+    date_range = pd.date_range(
+        start=events[0]['date'].date(),
+        end=events[-1]['date'].date() + timedelta(days=1),
+        freq='D'
+    )
+    
     member_count = 0
     daily_counts = []
+    
     for date in date_range:
-        for event in [e for e in events if e['date'].date() == date.date()]:
+        day_events = [e for e in events if e['date'].date() == date.date()]
+        for event in day_events:
             member_count += event['change']
-        daily_counts.append({'Date': date, 'Member Count': member_count})
+        
+        daily_counts.append({
+            'Date': date,
+            'Member Count': member_count
+        })
+    
     return pd.DataFrame(daily_counts)
 
 def create_weekly_breakdown(stats):
-    """
-    Create a weekly message breakdown.
-    "Week Duration" is based solely on the actual message dates from the export.
-    """
     if not stats['messages_data']:
         return pd.DataFrame()
+
     df = pd.DataFrame(stats['messages_data'])
+
     try:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
         st.error(f"Error converting timestamps: {e}")
         return pd.DataFrame()
+
     df.dropna(subset=['timestamp'], inplace=True)
     if df.empty:
         return pd.DataFrame()
-    df = df.set_index('timestamp').sort_index()
+
+    # Sort messages by timestamp
+    df = df.sort_values('timestamp')
+    
     weekly_data = []
+    current_date = None
+    messages_on_date = []
     week_number = 1
-    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        if week_df.empty:
-            continue
-        # Derive actual boundaries from messages in this group:
-        week_first_msg = week_df.index.min()
-        week_last_msg = week_df.index.max()
-        if week_first_msg.date() == week_last_msg.date():
-            week_duration_str = week_first_msg.strftime('%d %b %Y')
-        else:
-            week_duration_str = f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}"
-        week_messages = week_df.groupby('user').size().to_dict()
-        current_members = set()
-        left_members = set()
-        for member, status in stats['member_status'].items():
-            if status['first_seen'] <= week_last_msg:
-                current_members.add(member)
-            if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
-                current_members.discard(member)
-                left_members.add(member)
-        members_to_report = sorted(set(list(week_messages.keys()) + list(current_members)))
-        for member in members_to_report:
-            messages_sent = week_messages.get(member, 0)
+
+    # Process messages date by date
+    for index, row in df.iterrows():
+        message_date = row['timestamp'].date()
+        
+        # If we're on a new date
+        if message_date != current_date:
+            # Process the previous date's messages if any
+            if messages_on_date:
+                user_messages = {}
+                for msg in messages_on_date:
+                    user = msg['user']
+                    user_messages[user] = user_messages.get(user, 0) + 1
+
+                # Add data for each active user with date formatted as dd/mm/yy
+                for user, count in user_messages.items():
+                    weekly_data.append({
+                        'Week': f'Week {week_number}',
+                        'Week Duration': current_date.strftime('%d/%m/%y'),
+                        'Member Name': user,
+                        'Messages Sent': count
+                    })
+                
+                week_number += 1
+                messages_on_date = []
+            
+            current_date = message_date
+
+        # Add current message to the current date's collection
+        messages_on_date.append({
+            'user': row['user'],
+            'timestamp': row['timestamp']
+        })
+
+    # Process the last date's messages
+    if messages_on_date:
+        user_messages = {}
+        for msg in messages_on_date:
+            user = msg['user']
+            user_messages[user] = user_messages.get(user, 0) + 1
+
+        for user, count in user_messages.items():
             weekly_data.append({
                 'Week': f'Week {week_number}',
-                'Week Duration': week_duration_str,
-                'Member Name': member,
-                'Messages Sent': messages_sent,
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
+                'Week Duration': current_date.strftime('%d/%m/%y'),
+                'Member Name': user,
+                'Messages Sent': count
             })
-        week_number += 1
+    
     return pd.DataFrame(weekly_data)
 
-def fetch_stats(stats, df):
-    """Compute top-level statistics from the chat data."""
-    # Total messages from parsed data
-    total_messages = len(stats['messages_data'])
-    # Total words
-    total_words = sum(len(message.split()) for message in df['message'])
-    # Count media messages: common WhatsApp export text "<Media omitted>" (adjust if needed)
-    media_messages = sum(1 for message in df['message'] if "<Media omitted>" in message)
-    # Count links using a simple regex (matches http/https)
-    link_pattern = re.compile(r'https?://\S+')
-    links_shared = sum(1 for message in df['message'] if link_pattern.search(message))
-    return total_messages, total_words, media_messages, links_shared
-
-def create_wordcloud(selected_user, df):
-    """Generate a word cloud image from messages."""
-    if selected_user != "Overall":
-        df = df[df['user'] == selected_user]
-    text = " ".join(message for message in df['message'])
-    wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text)
-    return wordcloud
-
-##############################
-# Main App Function
-##############################
-
 def main():
-    st.sidebar.title("Chat Log Analyzer")
-    uploaded_file = st.sidebar.file_uploader("Upload WhatsApp chat log (TXT format)", type="txt")
+    st.title("Enhanced Chat Log Analyzer")
     
-    if uploaded_file is not None:
+    uploaded_file = st.file_uploader("Upload WhatsApp chat log (TXT format)", type="txt")
+    
+    if uploaded_file:
         with st.spinner("Parsing chat log..."):
             stats = parse_chat_log_file(uploaded_file)
-        if stats is None:
-            st.error("Error parsing the file.")
-            return
         
-        # Build a DataFrame from messages_data for additional stats and visualizations
-        df = pd.DataFrame(stats['messages_data'])
-        if df.empty:
-            st.error("No messages found.")
-            return
-        
-        # Extract unique users (filter out notifications if any)
-        user_list = list(stats['user_messages'].keys())
-        if "group_notification" in user_list:
-            user_list.remove("group_notification")
-        user_list.sort()
-        user_list.insert(0, "Overall")
-        selected_user = st.sidebar.selectbox("Show Analysis with respect to", user_list)
-        
-        if st.sidebar.button("Show Analysis"):
-            st.title("Top Statistics")
-            total_messages, total_words, media_messages, links_shared = fetch_stats(stats, df)
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.header("Total Messages")
-                st.title(total_messages)
-            with col2:
-                st.header("Total Words")
-                st.title(total_words)
-            with col3:
-                st.header("Media Shared")
-                st.title(media_messages)
-            with col4:
-                st.header("Links Shared")
-                st.title(links_shared)
+        if stats:
+            st.success(f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}")
             
-            # Member Count Timeline (using our existing timeline)
+            # Group Member Count Timeline
             st.markdown("### Group Member Count Over Time")
             timeline_df = create_member_timeline(stats)
             if not timeline_df.empty:
@@ -320,7 +316,9 @@ def main():
                     title='Group Member Count Timeline',
                     xaxis_title='Date',
                     yaxis_title='Number of Members',
-                    hovermode='x unified'
+                    hovermode='x unified',
+                    xaxis=dict(showgrid=True),
+                    yaxis=dict(showgrid=True)
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
@@ -329,46 +327,37 @@ def main():
             activity_df = create_member_activity_table(stats)
             st.dataframe(activity_df, use_container_width=True)
             
-            # Weekly Breakdown Table
+            # Activity statistics
+            active_count = len(activity_df[activity_df['Activity Status'] == 'Active'])
+            inactive_count = len(activity_df[activity_df['Activity Status'] == 'Inactive'])
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Active Members", active_count)
+            with col2:
+                st.metric("Inactive Members", inactive_count)
+            
+            # Weekly Message & Member Analysis Table
             st.markdown("### Weekly Message & Member Analysis")
             weekly_df = create_weekly_breakdown(stats)
             st.dataframe(weekly_df)
             
-            # Message Distribution Chart
+            # Message Distribution using Streamlit chart
             st.markdown("### Message Distribution")
             message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
-            fig = px.bar(message_df, x='Member', y='Messages', title='Messages per Member', color='Messages')
-            st.plotly_chart(fig, use_container_width=True)
+            st.bar_chart(message_df.set_index('Member'))
             
-            # Busiest Users (for overall analysis)
-            if selected_user == "Overall":
-                st.markdown("### Most Busy Users")
-                busy_users = pd.Series(stats['user_messages']).sort_values(ascending=False)
-                fig, ax = plt.subplots()
-                colors = plt.cm.viridis(np.linspace(0, 1, len(busy_users)))
-                ax.bar(busy_users.index, busy_users.values, color=colors)
-                plt.xticks(rotation=90)
-                plt.title("User Activity")
-                st.pyplot(fig)
-            
-            # Word Cloud
-            st.markdown("### Word Cloud for Frequent Words")
-            wc = create_wordcloud(selected_user, df)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.imshow(wc, interpolation="bilinear")
-            ax.axis("off")
-            st.pyplot(fig)
-            
-            # LLM Chat Summary (optional)
-            st.markdown("### Chat Analysis Summary (LLM)")
-            if st.button("Generate LLM Summary"):
+            # LLM Summary Section (if needed)
+            st.markdown("### Chat Analysis Summary")
+            if st.button("Generate Summary"):
                 client = initialize_llm_client()
                 prompt = (f"Analyze this chat log:\n"
                           f"- Total members: {stats['total_members']}\n"
                           f"- Current members: {stats['current_members']}\n"
+                          f"- Active members: {active_count}\n"
+                          f"- Inactive members: {inactive_count}\n"
                           f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
-                placeholder = st.empty()
-                get_llm_reply(client, prompt, placeholder)
+                word_placeholder = st.empty()
+                get_llm_reply(client, prompt, word_placeholder)
 
 if __name__ == "__main__":
     main()
