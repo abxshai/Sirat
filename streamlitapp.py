@@ -227,23 +227,25 @@ def create_weekly_breakdown(stats):
 
     if df.empty:
         return pd.DataFrame()
-    
-    df = df.set_index('timestamp') #CRUCIAL: Set 'timestamp' as the index
 
-    df = df.sort_index()  # Sort by index (which is now the timestamp)
+    df = df.set_index('timestamp')
+    df = df.sort_index()
 
     weekly_data = []
     week_number = 1
 
-    for (week_start, week_end), week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        message_dates = sorted(week_df.index.date.unique()) #Access index for dates
+    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')): #Correct Grouping
+        week_start = week_period.start_time #Extract start and end times
+        week_end = week_period.end_time
+        
+        message_dates = sorted(week_df.index.date.unique())
 
         if message_dates:
             for current_date in message_dates:
-                week_first_msg = week_df[week_df.index.date == current_date].index.min() #Access index
-                week_last_msg = week_df[week_df.index.date == current_date].index.max() #Access index
+                week_first_msg = week_df[week_df.index.date == current_date].index.min()
+                week_last_msg = week_df[week_df.index.date == current_date].index.max()
 
-                week_messages = week_df[week_df.index.date == current_date].groupby('user').size().to_dict() #Access index
+                week_messages = week_df[week_df.index.date == current_date].groupby('user').size().to_dict()
                 current_members = set()
                 left_members = set()
 
