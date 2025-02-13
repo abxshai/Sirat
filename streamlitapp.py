@@ -42,7 +42,7 @@ def get_llm_reply(client, prompt, word_placeholder):
             top_p=1,
             stream=True
         )
-
+        
         response = ""
         for chunk in completion:
             delta = chunk.choices[0].delta.content or ""
@@ -126,12 +126,14 @@ def parse_chat_log_file(uploaded_file):
                 timestamp = parse_datetime(msg_match)
                 user = clean_member_name(msg_match.group(8))
                 message = msg_match.group(9)
+                
                 messages_data.append({
                     "timestamp": timestamp,
                     "user": user,
                     "message": message
                 })
                 user_messages[user] += 1
+                
                 if user not in member_status:
                     member_status[user] = {
                         'first_seen': timestamp,
@@ -149,6 +151,7 @@ def parse_chat_log_file(uploaded_file):
                 try:
                     timestamp = parse_datetime(match)
                     user = clean_member_name(match.group(8))
+                    
                     if event_type == "join":
                         join_events[user].append(timestamp)
                         if user not in member_status:
@@ -170,7 +173,7 @@ def parse_chat_log_file(uploaded_file):
                 break
 
     current_members = sum(1 for m in member_status.values() if not m['last_left'])
-
+    
     return {
         'messages_data': messages_data,
         'user_messages': user_messages,
@@ -186,6 +189,7 @@ def create_member_activity_table(stats):
     for member, status in stats['member_status'].items():
         message_count = stats['user_messages'].get(member, 0)
         exit_count = status.get('exit_count', 0)
+        
         activity_data.append({
             'Member Name': member,
             'Message Count': message_count,
@@ -195,14 +199,19 @@ def create_member_activity_table(stats):
             'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Present',
             'Current Status': 'Left' if status['last_left'] else 'Present'
         })
-    return pd.DataFrame(activity_data).sort_values(
-        by=['Message Count', 'Member Name'],
-        ascending=[False, True]
-    )
+    
+    df = pd.DataFrame(activity_data)
+    if not df.empty:
+        df = df.sort_values(
+            by=['Message Count', 'Member Name'],
+            ascending=[False, True]
+        )
+    return df
 
 def create_member_timeline(stats):
     """Create member count timeline with accurate date parsing."""
     events = []
+    
     for member, status in stats['member_status'].items():
         events.append({
             'date': status['first_seen'],
@@ -217,14 +226,19 @@ def create_member_timeline(stats):
                 'member': member,
                 'type': 'left'
             })
+    
     if not events:
         return pd.DataFrame()
+        
     events.sort(key=lambda x: x['date'])
+    
     timeline = []
     current_count = 0
     current_date = events[0]['date'].date()
+    
     for event in events:
         event_date = event['date'].date()
+        
         # Fill gaps between dates
         while current_date < event_date:
             timeline.append({
@@ -232,6 +246,7 @@ def create_member_timeline(stats):
                 'Member Count': current_count
             })
             current_date += timedelta(days=1)
+        
         # Update count for event date
         current_count += event['change']
         timeline.append({
@@ -241,17 +256,21 @@ def create_member_timeline(stats):
             'Member': event['member']
         })
         current_date = event_date
+    
     return pd.DataFrame(timeline)
 
 def create_weekly_breakdown(stats):
     """Create weekly breakdown with accurate date ranges."""
     if not stats['messages_data']:
         return pd.DataFrame()
+
     df = pd.DataFrame(stats['messages_data'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp']).sort_values('timestamp')
+    
     if df.empty:
         return pd.DataFrame()
+
     # Create proper week grouping
     df['week_start'] = df['timestamp'].dt.to_period('W').dt.start_time
     weekly_data = df.groupby(['week_start', 'user']).agg(
@@ -259,10 +278,12 @@ def create_weekly_breakdown(stats):
         First_Date=('timestamp', 'min'),
         Last_Date=('timestamp', 'max')
     ).reset_index()
+    
     weekly_data['Week Duration'] = weekly_data.apply(
         lambda x: f"{x['First_Date'].strftime('%d %b')} - {x['Last_Date'].strftime('%d %b %Y')}",
         axis=1
     )
+    
     # Format final output
     weekly_data = weekly_data.rename(columns={
         'user': 'Member Name',
@@ -270,18 +291,23 @@ def create_weekly_breakdown(stats):
         'week_start': 'Week Start'
     })
     weekly_data['Week'] = 'Week ' + (weekly_data.groupby('Week Start').ngroup() + 1).astype(str)
+    
     return weekly_data[['Week', 'Week Duration', 'Member Name', 'Messages Sent']]
 
 def main():
     st.title("Enhanced Chat Log Analyzer")
+    
     uploaded_file = st.file_uploader("Upload WhatsApp chat log (TXT format)", type="txt")
+    
     if uploaded_file:
         with st.spinner("Parsing chat log..."):
             stats = parse_chat_log_file(uploaded_file)
+        
         if stats:
             st.success(
                 f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}"
             )
+            
             # Member Timeline Chart
             st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
@@ -294,6 +320,7 @@ def main():
                     title='Member Participation Over Time'
                 )
                 st.plotly_chart(fig, use_container_width=True)
+            
             # Enhanced Activity Table
             st.markdown("### Member Activity Overview")
             activity_df = create_member_activity_table(stats)
@@ -304,10 +331,12 @@ def main():
                 }),
                 use_container_width=True
             )
+            
             # Exit Events Analysis
             st.markdown("### Exit Events Summary")
             exit_df = activity_df[['Member Name', 'Exit Events', 'Left Date']].sort_values('Exit Events', ascending=False)
             st.dataframe(exit_df, use_container_width=True)
+            
             # Weekly Breakdown
             st.markdown("### Weekly Engagement Analysis")
             weekly_df = create_weekly_breakdown(stats)
@@ -322,6 +351,7 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(weekly_df, use_container_width=True)
+
             # LLM Summary Section
             st.markdown("### AI-Powered Insights")
             if st.button("Generate Smart Summary"):
@@ -329,6 +359,7 @@ def main():
                 prompt = f"Analyze this chat log with {stats['total_members']} members. "
                 prompt += f"Key stats: {stats['current_members']} current members, "
                 prompt += f"Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}"
+                
                 word_placeholder = st.empty()
                 get_llm_reply(client, prompt, word_placeholder)
 
