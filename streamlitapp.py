@@ -230,52 +230,58 @@ def create_weekly_breakdown(stats):
     # Sort messages by timestamp
     df = df.sort_values('timestamp')
     
-    # Create a week identifier based on the ISO calendar
-    df['week_num'] = df['timestamp'].dt.isocalendar().week
-
     weekly_data = []
+    current_date = None
+    messages_on_date = []
     week_number = 1
 
-    # Group by ISO week
-    for week_num, week_df in df.groupby('week_num'):
-        # Get actual message dates for this week
-        week_dates = week_df['timestamp'].dt.date.unique()
+    # Process messages date by date
+    for index, row in df.iterrows():
+        message_date = row['timestamp'].date()
         
-        if len(week_dates) == 1:
-            week_duration_str = week_dates[0].strftime('%d %b %Y')
-        else:
-            week_duration_str = f"{min(week_dates).strftime('%d %b %Y')} - {max(week_dates).strftime('%d %b %Y')}"
+        # If we're on a new date
+        if message_date != current_date:
+            # Process the previous date's messages if any
+            if messages_on_date:
+                user_messages = {}
+                for msg in messages_on_date:
+                    user = msg['user']
+                    user_messages[user] = user_messages.get(user, 0) + 1
 
-        # Get message counts per user for this week
-        week_messages = week_df.groupby('user').size().to_dict()
-        
-        # Get member status for this week's dates
-        week_start = min(week_dates)
-        week_end = max(week_dates)
-        
-        current_members = set()
-        left_members = set()
-        
-        for member, status in stats['member_status'].items():
-            if status['first_seen'].date() <= week_end:
-                current_members.add(member)
-            if status['last_left'] and week_start <= status['last_left'].date() <= week_end:
-                current_members.discard(member)
-                left_members.add(member)
+                # Add data for each active user
+                for user, count in user_messages.items():
+                    weekly_data.append({
+                        'Week': f'Week {week_number}',
+                        'Week Duration': current_date.strftime('%d %b %Y'),
+                        'Member Name': user,
+                        'Messages Sent': count
+                    })
+                
+                week_number += 1
+                messages_on_date = []
+            
+            current_date = message_date
 
-        # Add data for each member
-        for member in week_messages.keys():
+        # Add current message to the current date's collection
+        messages_on_date.append({
+            'user': row['user'],
+            'timestamp': row['timestamp']
+        })
+
+    # Process the last date's messages
+    if messages_on_date:
+        user_messages = {}
+        for msg in messages_on_date:
+            user = msg['user']
+            user_messages[user] = user_messages.get(user, 0) + 1
+
+        for user, count in user_messages.items():
             weekly_data.append({
                 'Week': f'Week {week_number}',
-                'Week Duration': week_duration_str,
-                'Member Name': member,
-                'Messages Sent': week_messages[member],
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
+                'Week Duration': current_date.strftime('%d %b %Y'),
+                'Member Name': user,
+                'Messages Sent': count
             })
-
-        week_number += 1
 
     return pd.DataFrame(weekly_data)
 def main():
