@@ -212,12 +212,11 @@ def create_member_timeline(stats):
     return pd.DataFrame(daily_counts)
 
 def create_weekly_breakdown(stats):
-    """Create weekly message breakdown with fixed date handling and active/inactive member distinction."""
+    """Create weekly message breakdown with fixed date handling."""
     if not stats['messages_data']:
         return pd.DataFrame()
 
     df = pd.DataFrame(stats['messages_data'])
-    
     # Get actual date range from messages
     min_date = df['timestamp'].min()
     max_date = df['timestamp'].max()
@@ -232,7 +231,7 @@ def create_weekly_breakdown(stats):
         end=last_sunday,
         freq='W-MON'
     )
-
+    
     weekly_data = []
     current_members = set()
     left_members = set()
@@ -289,7 +288,7 @@ def create_weekly_breakdown(stats):
                 'Left Members': len(left_members),
                 'Current Members': len(current_members) - len(left_members)
             })
-
+    
     return pd.DataFrame(weekly_data)
 
 def main():
