@@ -227,34 +227,34 @@ def create_weekly_breakdown(stats):
     if df.empty:
         return pd.DataFrame()
 
-    df = df.set_index('timestamp').sort_index()
+    # Sort messages by timestamp
+    df = df.sort_values('timestamp')
+    
+    # Create a week identifier based on the ISO calendar
+    df['week_num'] = df['timestamp'].dt.isocalendar().week
+
     weekly_data = []
     week_number = 1
 
-    # Group messages by week (using Monday as the start)
-    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        if week_df.empty:
-            continue
-
-        # Get the actual dates where messages exist in this week
-        actual_dates = pd.to_datetime(week_df.index).date
-        if len(actual_dates) == 0:
-            continue
-
-        # Create the week duration string based on actual message dates
-        if len(set(actual_dates)) == 1:
-            week_duration_str = actual_dates[0].strftime('%d %b %Y')
+    # Group by ISO week
+    for week_num, week_df in df.groupby('week_num'):
+        # Get actual message dates for this week
+        week_dates = week_df['timestamp'].dt.date.unique()
+        
+        if len(week_dates) == 1:
+            week_duration_str = week_dates[0].strftime('%d %b %Y')
         else:
-            week_duration_str = f"{min(actual_dates).strftime('%d %b %Y')} - {max(actual_dates).strftime('%d %b %Y')}"
+            week_duration_str = f"{min(week_dates).strftime('%d %b %Y')} - {max(week_dates).strftime('%d %b %Y')}"
 
-        # Get message counts per user for this group
+        # Get message counts per user for this week
         week_messages = week_df.groupby('user').size().to_dict()
-
-        # Determine active and left members based on the week's actual dates
+        
+        # Get member status for this week's dates
+        week_start = min(week_dates)
+        week_end = max(week_dates)
+        
         current_members = set()
         left_members = set()
-        week_start = min(actual_dates)
-        week_end = max(actual_dates)
         
         for member, status in stats['member_status'].items():
             if status['first_seen'].date() <= week_end:
@@ -263,15 +263,13 @@ def create_weekly_breakdown(stats):
                 current_members.discard(member)
                 left_members.add(member)
 
-        # Report for each member who either sent messages or is active in this week
-        members_to_report = sorted(set(list(week_messages.keys()) + list(current_members)))
-        for member in members_to_report:
-            messages_sent = week_messages.get(member, 0)
+        # Add data for each member
+        for member in week_messages.keys():
             weekly_data.append({
                 'Week': f'Week {week_number}',
                 'Week Duration': week_duration_str,
                 'Member Name': member,
-                'Messages Sent': messages_sent,
+                'Messages Sent': week_messages[member],
                 'Total Members': len(current_members),
                 'Left Members': len(left_members),
                 'Current Members': len(current_members) - len(left_members)
