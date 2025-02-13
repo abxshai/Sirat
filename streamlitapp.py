@@ -301,15 +301,21 @@ def main():
             stats = parse_chat_log_file(uploaded_file)
         
         if stats:
-            st.success(f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}")
+            st.success(
+                f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}"
+            )
             
             # Member Timeline Chart
             st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
             if not timeline_df.empty:
-                fig = px.area(timeline_df, x='Date', y='Member Count', 
-                            hover_data=['Member', 'Event Type'],
-                            title='Member Participation Over Time')
+                fig = px.area(
+                    timeline_df,
+                    x='Date',
+                    y='Member Count',
+                    hover_data=['Member', 'Event Type'],
+                    title='Member Participation Over Time'
+                )
                 st.plotly_chart(fig, use_container_width=True)
             
             # Enhanced Activity Table
@@ -332,9 +338,14 @@ def main():
             st.markdown("### Weekly Engagement Analysis")
             weekly_df = create_weekly_breakdown(stats)
             if not weekly_df.empty:
-                fig = px.bar(weekly_df, x='Week Duration', y='Messages Sent', 
-                           color='Member Name', barmode='stack',
-                           title='Weekly Message Distribution')
+                fig = px.bar(
+                    weekly_df,
+                    x='Week Duration',
+                    y='Messages Sent',
+                    color='Member Name',
+                    barmode='stack',
+                    title='Weekly Message Distribution'
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 st.dataframe(weekly_df, use_container_width=True)
 
