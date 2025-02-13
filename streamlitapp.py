@@ -25,7 +25,7 @@ def get_llm_reply(client, prompt, word_placeholder):
     """Get LLM summary using Groq API."""
     try:
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama3-70b-8192",
             messages=[
                 {
                     "role": "system",
@@ -54,7 +54,7 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_chat_log_file(uploaded_file):
-    """Parse WhatsApp chat log file."""
+    """Parse WhatsApp chat log file with precise date parsing."""
     try:
         content = uploaded_file.read()
         try:
@@ -65,82 +65,112 @@ def parse_chat_log_file(uploaded_file):
         st.error(f"Error reading file: {str(e)}")
         return None
 
-    # Initialize data structures
     messages_data = []
     user_messages = Counter()
     member_status = {}
     join_events = defaultdict(list)
     left_events = defaultdict(list)
 
-    # Compile regex patterns that handle lines with or without brackets
-    # Examples:
-    # 08/03/22, 11:36:02 AM SIRAT Warriors: News & Updates …
-    # [08/03/22, 11:36:01 AM] You: You created this group
-    message_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?):\s(.*)$'
+    # Improved regex pattern with explicit date component capture
+    date_pattern = r'''
+        \[?
+        (\d{1,2})[\/\.-]      # Day
+        (\d{1,2})[\/\.-]      # Month
+        (\d{2,4}),\s+         # Year
+        (\d{1,2}):(\d{2})     # Hour:Minute
+        (?::(\d{2}))?         # Optional seconds
+        \s*([APap][Mm])       # AM/PM
+        \]?
+    '''
+
+    message_re = re.compile(
+        rf'^{date_pattern}\s*-?\s*(.*?):\s(.*)$',
+        re.VERBOSE
     )
-    join_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) joined'
+
+    join_re = re.compile(
+        rf'^{date_pattern}\s*-?\s*(.*?) joined',
+        re.VERBOSE
     )
-    left_pattern = re.compile(
-        r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]?\s*-?\s*(.*?) left'
+
+    left_re = re.compile(
+        rf'^{date_pattern}\s*-?\s*(.*?) left',
+        re.VERBOSE
     )
+
+    def parse_datetime(match):
+        """Parse datetime components from regex match."""
+        day, month, year, hour, minute, sec, ampm = match.groups()
+        year = int(year) if len(year) == 4 else int(f"20{year}")
+        hour = int(hour)
+        if ampm.lower() == 'pm' and hour < 12:
+            hour += 12
+        return datetime(
+            year=year,
+            month=int(month),
+            day=int(day),
+            hour=hour,
+            minute=int(minute),
+            second=int(sec) if sec else 0
+        )
 
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
 
-        # Try to match a regular message first
-        msg_match = message_pattern.match(line)
+        # Parse messages
+        msg_match = message_re.match(line)
         if msg_match:
-            timestamp_str, user, message = msg_match.groups()
             try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
+                timestamp = parse_datetime(msg_match)
+                user = clean_member_name(msg_match.group(8))
+                message = msg_match.group(9)
+                
                 messages_data.append({
                     "timestamp": timestamp,
                     "user": user,
                     "message": message
                 })
                 user_messages[user] += 1
+                
                 if user not in member_status:
                     member_status[user] = {
                         'first_seen': timestamp,
-                        'last_left': None
+                        'last_left': None,
+                        'exit_count': 0
                     }
-            except Exception:
+            except Exception as e:
                 continue
             continue
 
-        # Check for join/left events
-        join_match = join_pattern.match(line)
-        left_match = left_pattern.match(line)
-
-        if join_match:
-            timestamp_str, user = join_match.groups()
-            try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
-                join_events[user].append(timestamp)
-                if user not in member_status:
-                    member_status[user] = {
-                        'first_seen': timestamp,
-                        'last_left': None
-                    }
-            except Exception:
-                continue
-
-        elif left_match:
-            timestamp_str, user = left_match.groups()
-            try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=True)
-                user = clean_member_name(user)
-                left_events[user].append(timestamp)
-                if user in member_status:
-                    member_status[user]['last_left'] = timestamp
-            except Exception:
-                continue
+        # Parse join/leave events
+        for pattern, event_type in [(join_re, "join"), (left_re, "left")]:
+            match = pattern.match(line)
+            if match:
+                try:
+                    timestamp = parse_datetime(match)
+                    user = clean_member_name(match.group(8))
+                    
+                    if event_type == "join":
+                        join_events[user].append(timestamp)
+                        if user not in member_status:
+                            member_status[user] = {
+                                'first_seen': timestamp,
+                                'last_left': None,
+                                'exit_count': 0
+                            }
+                    else:
+                        left_events[user].append(timestamp)
+                        member_status.setdefault(user, {
+                            'first_seen': timestamp,
+                            'last_left': None,
+                            'exit_count': 0
+                        })['exit_count'] += 1
+                        member_status[user]['last_left'] = timestamp
+                except Exception as e:
+                    continue
+                break
 
     current_members = sum(1 for m in member_status.values() if not m['last_left'])
     
@@ -149,20 +179,24 @@ def parse_chat_log_file(uploaded_file):
         'user_messages': user_messages,
         'member_status': member_status,
         'total_members': len(member_status),
-        'current_members': current_members
+        'current_members': current_members,
+        'left_events': left_events
     }
 
 def create_member_activity_table(stats):
-    """Create activity status table."""
+    """Create activity status table with exit events."""
     activity_data = []
     for member, status in stats['member_status'].items():
         message_count = stats['user_messages'].get(member, 0)
+        exit_count = status.get('exit_count', 0)
+        
         activity_data.append({
             'Member Name': member,
             'Message Count': message_count,
+            'Exit Events': exit_count,
             'Activity Status': 'Active' if message_count > 0 else 'Inactive',
             'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Still in group',
+            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Present',
             'Current Status': 'Left' if status['last_left'] else 'Present'
         })
     
@@ -172,92 +206,90 @@ def create_member_activity_table(stats):
     )
 
 def create_member_timeline(stats):
-    """Create member count timeline."""
+    """Create member count timeline with accurate date parsing."""
     events = []
     
     for member, status in stats['member_status'].items():
-        if status['first_seen']:
-            events.append({
-                'date': status['first_seen'],
-                'change': 1,
-                'member': member
-            })
+        events.append({
+            'date': status['first_seen'],
+            'change': 1,
+            'member': member,
+            'type': 'join'
+        })
         if status['last_left']:
             events.append({
                 'date': status['last_left'],
                 'change': -1,
-                'member': member
+                'member': member,
+                'type': 'left'
             })
     
     if not events:
         return pd.DataFrame()
         
     events.sort(key=lambda x: x['date'])
-    date_range = pd.date_range(
-        start=events[0]['date'].date(),
-        end=events[-1]['date'].date() + timedelta(days=1),
-        freq='D'
-    )
     
-    member_count = 0
-    daily_counts = []
+    timeline = []
+    current_count = 0
+    current_date = events[0]['date'].date()
     
-    for date in date_range:
-        day_events = [e for e in events if e['date'].date() == date.date()]
-        for event in day_events:
-            member_count += event['change']
+    for event in events:
+        event_date = event['date'].date()
         
-        daily_counts.append({
-            'Date': date,
-            'Member Count': member_count
+        # Fill gaps between dates
+        while current_date < event_date:
+            timeline.append({
+                'Date': datetime.combine(current_date, datetime.min.time()),
+                'Member Count': current_count
+            })
+            current_date += timedelta(days=1)
+        
+        # Update count for event date
+        current_count += event['change']
+        timeline.append({
+            'Date': event['date'],
+            'Member Count': current_count,
+            'Event Type': event['type'],
+            'Member': event['member']
         })
+        current_date = event_date
     
-    return pd.DataFrame(daily_counts)
+    return pd.DataFrame(timeline)
 
 def create_weekly_breakdown(stats):
+    """Create weekly breakdown with accurate date ranges."""
     if not stats['messages_data']:
         return pd.DataFrame()
 
     df = pd.DataFrame(stats['messages_data'])
-
-    try:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    except ValueError as e:
-        st.error(f"Error converting timestamps: {e}")
-        return pd.DataFrame()
-
-    df.dropna(subset=['timestamp'], inplace=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df = df.dropna(subset=['timestamp']).sort_values('timestamp')
+    
     if df.empty:
         return pd.DataFrame()
 
-    df = df.sort_values('timestamp')
+    # Create proper week grouping
+    df['week_start'] = df['timestamp'].dt.to_period('W').dt.start_time
+    weekly_data = df.groupby(['week_start', 'user']).agg(
+        Messages=('timestamp', 'count'),
+        First_Date=('timestamp', 'min'),
+        Last_Date=('timestamp', 'max')
+    ).reset_index()
     
-    # Extract date from timestamp and find the earliest date
-    df['date'] = df['timestamp'].dt.date
-    min_date = df['date'].min()
-    
-    # Calculate the number of days from the earliest date and determine the week number
-    df['delta_days'] = (df['date'] - min_date).apply(lambda x: x.days)
-    df['week_number'] = (df['delta_days'] // 7) + 1
-    
-    # Group by week and user to count messages
-    weekly_counts = df.groupby(['week_number', 'user']).size().reset_index(name='Messages Sent')
-    
-    # Determine the start and end dates for each week
-    week_dates = df.groupby('week_number')['date'].agg(['min', 'max']).reset_index()
-    week_dates['Week Duration'] = week_dates.apply(
-        lambda row: f"{row['min'].strftime('%d %b %Y')} - {row['max'].strftime('%d %b %Y')}", axis=1
+    weekly_data['Week Duration'] = weekly_data.apply(
+        lambda x: f"{x['First_Date'].strftime('%d %b')} - {x['Last_Date'].strftime('%d %b %Y')}",
+        axis=1
     )
     
-    # Merge the message counts with week durations
-    weekly_data = pd.merge(weekly_counts, week_dates[['week_number', 'Week Duration']], on='week_number')
+    # Format final output
+    weekly_data = weekly_data.rename(columns={
+        'user': 'Member Name',
+        'Messages': 'Messages Sent',
+        'week_start': 'Week Start'
+    })
+    weekly_data['Week'] = 'Week ' + (weekly_data.groupby('Week Start').ngroup() + 1).astype(str)
     
-    # Format the final DataFrame
-    weekly_data['Week'] = 'Week ' + weekly_data['week_number'].astype(str)
-    weekly_data.rename(columns={'user': 'Member Name'}, inplace=True)
-    weekly_data = weekly_data[['Week', 'Week Duration', 'Member Name', 'Messages Sent']]
-    
-    return weekly_data
+    return weekly_data[['Week', 'Week Duration', 'Member Name', 'Messages Sent']]
 
 def main():
     st.title("Enhanced Chat Log Analyzer")
@@ -271,62 +303,49 @@ def main():
         if stats:
             st.success(f"Chat log parsed successfully!\n- Total Members Ever: {stats['total_members']}\n- Currently Active Members: {stats['current_members']}")
             
-            # Group Member Count Timeline
-            st.markdown("### Group Member Count Over Time")
+            # Member Timeline Chart
+            st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
             if not timeline_df.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=timeline_df['Date'],
-                    y=timeline_df['Member Count'],
-                    mode='lines',
-                    name='Member Count',
-                    line=dict(color='#2E86C1', width=2)
-                ))
-                fig.update_layout(
-                    title='Group Member Count Timeline',
-                    xaxis_title='Date',
-                    yaxis_title='Number of Members',
-                    hovermode='x unified',
-                    xaxis=dict(showgrid=True),
-                    yaxis=dict(showgrid=True)
-                )
+                fig = px.area(timeline_df, x='Date', y='Member Count', 
+                            hover_data=['Member', 'Event Type'],
+                            title='Member Participation Over Time')
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Member Activity Table
-            st.markdown("### Member Activity Status")
+            # Enhanced Activity Table
+            st.markdown("### Member Activity Overview")
             activity_df = create_member_activity_table(stats)
-            st.dataframe(activity_df, use_container_width=True)
+            st.dataframe(
+                activity_df.style.format({
+                    'Join Date': lambda x: x,
+                    'Left Date': lambda x: x
+                }),
+                use_container_width=True
+            )
             
-            # Activity statistics
-            active_count = len(activity_df[activity_df['Activity Status'] == 'Active'])
-            inactive_count = len(activity_df[activity_df['Activity Status'] == 'Inactive'])
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Active Members", active_count)
-            with col2:
-                st.metric("Inactive Members", inactive_count)
+            # Exit Events Analysis
+            st.markdown("### Exit Events Summary")
+            exit_df = activity_df[['Member Name', 'Exit Events', 'Left Date']].sort_values('Exit Events', ascending=False)
+            st.dataframe(exit_df, use_container_width=True)
             
-            # Weekly Message & Member Analysis Table
-            st.markdown("### Weekly Message & Member Analysis")
+            # Weekly Breakdown
+            st.markdown("### Weekly Engagement Analysis")
             weekly_df = create_weekly_breakdown(stats)
-            st.dataframe(weekly_df)
-            
-            # Message Distribution using Streamlit chart
-            st.markdown("### Message Distribution")
-            message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
-            st.bar_chart(message_df.set_index('Member'))
-            
-            # LLM Summary Section (if needed)
-            st.markdown("### Chat Analysis Summary")
-            if st.button("Generate Summary"):
+            if not weekly_df.empty:
+                fig = px.bar(weekly_df, x='Week Duration', y='Messages Sent', 
+                           color='Member Name', barmode='stack',
+                           title='Weekly Message Distribution')
+                st.plotly_chart(fig, use_container_width=True)
+                st.dataframe(weekly_df, use_container_width=True)
+
+            # LLM Summary Section
+            st.markdown("### AI-Powered Insights")
+            if st.button("Generate Smart Summary"):
                 client = initialize_llm_client()
-                prompt = (f"Analyze this chat log:\n"
-                          f"- Total members: {stats['total_members']}\n"
-                          f"- Current members: {stats['current_members']}\n"
-                          f"- Active members: {active_count}\n"
-                          f"- Inactive members: {inactive_count}\n"
-                          f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
+                prompt = f"Analyze this chat log with {stats['total_members']} members. "
+                prompt += f"Key stats: {stats['current_members']} current members, "
+                prompt += f"Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}"
+                
                 word_placeholder = st.empty()
                 get_llm_reply(client, prompt, word_placeholder)
 
