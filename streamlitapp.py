@@ -285,8 +285,8 @@ def create_weekly_breakdown(stats):
                 'Member Name': user,
                 'Messages Sent': count
             })
-
-    return pd.DataFrame(weekly_data)
+            
+            return pd.DataFrame(weekly_data)
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
