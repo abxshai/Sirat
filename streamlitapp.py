@@ -212,10 +212,22 @@ def create_member_timeline(stats):
     return pd.DataFrame(daily_counts)
 
 def create_weekly_breakdown(stats):
-    # ... (rest of the function is the same up to the groupby)
+    if not stats['messages_data']:
+        return pd.DataFrame()
 
-    for (week_start, week_end), week_df in df.groupby(['week_start', 'week_end']):
-        # Clip week end to the max date from the chat
+    df = pd.DataFrame(stats['messages_data'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+
+    # Calculate week start *before* grouping
+    df['week_start'] = df['timestamp'].dt.to_period('W-MON').dt.start_time
+
+    weekly_data = []
+    week_number = 1
+
+    # Now group only by week_start
+    for week_start, week_df in df.groupby('week_start'):
+        week_end = week_start + timedelta(days=6)  # Calculate week_end *after* grouping
         week_end = min(week_end, df['timestamp'].max())
         week_start = max(week_start, df['timestamp'].min())
 
@@ -223,7 +235,6 @@ def create_weekly_breakdown(stats):
         current_members = set()
         left_members = set()
 
-        # Efficiently update member status using boolean indexing
         for member, status in stats['member_status'].items():
             if status['first_seen'] <= week_end:
                 current_members.add(member)
@@ -232,17 +243,15 @@ def create_weekly_breakdown(stats):
                 left_members.add(member)
 
         if not week_df.empty:
-            # Correctly get the first and last message timestamps for the week
             week_first_msg = week_df['timestamp'].min()
             week_last_msg = week_df['timestamp'].max()
 
             active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
 
-            for member in sorted(current_members):  # Iterate through ALL current members
+            for member in sorted(current_members):
                 messages_sent = week_messages.get(member, 0)
                 weekly_data.append({
                     'Week': f'Week {week_number}',
-                    # Use week_first_msg and week_last_msg here
                     'Week Duration': f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}",
                     'Member Name': member,
                     'Messages Sent': messages_sent,
