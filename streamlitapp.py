@@ -219,17 +219,20 @@ def create_weekly_breakdown(stats):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     df = df.sort_values('timestamp')
 
-    # Calculate week start *before* grouping
+    min_date = df['timestamp'].min()  # Store the overall minimum date
+    max_date = df['timestamp'].max()  # Store the overall maximum date
+
     df['week_start'] = df['timestamp'].dt.to_period('W-MON').dt.start_time
 
     weekly_data = []
     week_number = 1
 
-    # Now group only by week_start
     for week_start, week_df in df.groupby('week_start'):
-        week_end = week_start + timedelta(days=6)  # Calculate week_end *after* grouping
-        week_end = min(week_end, df['timestamp'].max())
-        week_start = max(week_start, df['timestamp'].min())
+        # Crucial: Adjust week_start to be no earlier than the first message
+        week_start = max(week_start, min_date)
+
+        week_end = week_start + timedelta(days=6)
+        week_end = min(week_end, max_date)  # Clip to overall max date
 
         week_messages = week_df.groupby('user').size().to_dict()
         current_members = set()
@@ -263,7 +266,6 @@ def create_weekly_breakdown(stats):
             week_number += 1
 
     return pd.DataFrame(weekly_data)
-
 def main():
     st.title("Enhanced Chat Log Analyzer")
     
