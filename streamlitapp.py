@@ -212,42 +212,27 @@ def create_member_timeline(stats):
     return pd.DataFrame(daily_counts)
 
 def create_weekly_breakdown(stats):
-    """Create weekly message breakdown with fixed date handling."""
+    """Create weekly message breakdown strictly within chat dates."""
     if not stats['messages_data']:
         return pd.DataFrame()
 
     df = pd.DataFrame(stats['messages_data'])
+    
     # Get actual date range from messages
-    min_date = df['timestamp'].min()
-    max_date = df['timestamp'].max()
+    min_date = df['timestamp'].min().replace(hour=0, minute=0, second=0, microsecond=0)
+    max_date = df['timestamp'].max().replace(hour=23, minute=59, second=59, microsecond=999999)
     
-    # Find the Monday of the week containing the first message
-    first_monday = min_date - timedelta(days=min_date.weekday())
-    # Find the Sunday of the week containing the last message
-    last_sunday = max_date + timedelta(days=(6 - max_date.weekday()))
-    
-    weeks = pd.date_range(
-        start=first_monday,
-        end=last_sunday,
-        freq='W-MON'
-    )
-    
+    # Find the start of the first week and end of the last week
+    current_date = min_date
     weekly_data = []
     current_members = set()
     left_members = set()
+    week_number = 1
     
-    # Track unique weeks to avoid repetition
-    processed_weeks = set()
-    
-    for week_start in weeks:
-        week_end = week_start + timedelta(days=6)
-        
-        # Skip if this week is beyond our actual data
-        if week_start > max_date:
-            continue
-            
-        week_number = len(processed_weeks) + 1
-        processed_weeks.add(week_start)
+    while current_date <= max_date:
+        # Calculate week boundaries within the chat date range
+        week_start = current_date
+        week_end = min(week_start + timedelta(days=6), max_date)
         
         # Update member counts for this week
         for member, status in stats['member_status'].items():
@@ -257,37 +242,46 @@ def create_weekly_breakdown(stats):
                 current_members.discard(member)
                 left_members.add(member)
         
-        # Get messages for this week
+        # Get messages for this week - use inclusive range
         week_mask = (df['timestamp'] >= week_start) & (df['timestamp'] <= week_end)
-        week_messages = df[week_mask].groupby('user').size().to_dict()
+        week_df = df[week_mask]
         
-        # Create entry for each active member in this week
-        active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
+        # Only create entries if there are messages in this week
+        if not week_df.empty:
+            week_messages = week_df.groupby('user').size().to_dict()
+            
+            # Create entry for each active member in this week
+            active_members_this_week = {user for user in current_members if week_messages.get(user, 0) > 0}
+            
+            # Add active members first
+            for member in sorted(active_members_this_week):
+                weekly_data.append({
+                    'Week': f'Week {week_number}',
+                    'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
+                    'Member Name': member,
+                    'Messages Sent': week_messages.get(member, 0),
+                    'Total Members': len(current_members),
+                    'Left Members': len(left_members),
+                    'Current Members': len(current_members) - len(left_members)
+                })
+            
+            # Then add inactive members
+            inactive_members = current_members - active_members_this_week
+            for member in sorted(inactive_members):
+                weekly_data.append({
+                    'Week': f'Week {week_number}',
+                    'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
+                    'Member Name': member,
+                    'Messages Sent': 0,
+                    'Total Members': len(current_members),
+                    'Left Members': len(left_members),
+                    'Current Members': len(current_members) - len(left_members)
+                })
+            
+            week_number += 1
         
-        # Add active members first
-        for member in sorted(active_members_this_week):
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Messages Sent': week_messages.get(member, 0),
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
-            })
-        
-        # Then add inactive members
-        inactive_members = current_members - active_members_this_week
-        for member in sorted(inactive_members):
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': f"{week_start.strftime('%d %b %Y')} - {week_end.strftime('%d %b %Y')}",
-                'Member Name': member,
-                'Messages Sent': 0,
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
-            })
+        # Move to next week
+        current_date = week_end + timedelta(days=1)
     
     return pd.DataFrame(weekly_data)
 
