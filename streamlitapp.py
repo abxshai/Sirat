@@ -242,6 +242,33 @@ def create_wordcloud(selected_user, df):
     return wordcloud
 
 ##############################
+# Member Activity Table
+##############################
+
+def create_member_activity_table(stats):
+    """Create activity status table with exit events."""
+    activity_data = []
+    for member, status in stats['member_status'].items():
+        # Skip system notifications if present
+        if member == "group_notification":
+            continue
+        message_count = stats['user_messages'].get(member, 0)
+        exit_count = status.get('exit_count', 0)
+        activity_data.append({
+            'Member Name': member,
+            'Message Count': message_count,
+            'Exit Events': exit_count,
+            'Activity Status': 'Active' if message_count > 0 else 'Inactive',
+            'Join Date': status['first_seen'].strftime('%d %b %Y'),
+            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Present',
+            'Current Status': 'Left' if status['last_left'] else 'Present'
+        })
+    df = pd.DataFrame(activity_data)
+    if not df.empty:
+        df = df.sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
+    return df
+
+##############################
 # Main App Function
 ##############################
 
