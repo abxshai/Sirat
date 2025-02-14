@@ -248,7 +248,6 @@ def create_exit_events_table(stats):
     if not stats.get('exit_events'):
         return pd.DataFrame()
     df = pd.DataFrame(stats['exit_events'])
-    # Rename columns for clarity; display only the user and the exact date/time as it appears in the file.
     df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
     return df[['User', 'Exact Date/Time']]
 
@@ -379,16 +378,6 @@ def main():
             message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
             fig = px.bar(message_df, x='Member', y='Messages', title='Messages per Member', color='Messages')
             st.plotly_chart(fig, use_container_width=True)
-            
-            if selected_user == "Overall":
-                st.markdown("### Most Busy Users")
-                busy_users = pd.Series(stats['user_messages']).sort_values(ascending=False)
-                fig, ax = plt.subplots()
-                colors = plt.cm.viridis(np.linspace(0, 1, len(busy_users)))
-                ax.bar(busy_users.index, busy_users.values, color=colors)
-                plt.xticks(rotation=90)
-                plt.title("User Activity")
-                st.pyplot(fig)
             
             st.markdown("### Word Cloud for Frequent Words")
             wc = create_wordcloud(selected_user, df)
