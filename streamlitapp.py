@@ -7,8 +7,7 @@ from collections import Counter
 from datetime import datetime
 from dateutil import parser as date_parser
 import numpy as np
-from io import StringIO
-import itertools
+from io import StringIO, BytesIO
 
 # Configure Streamlit page and memory management
 st.set_page_config(layout="wide")
@@ -101,6 +100,14 @@ def process_line(line, patterns):
     
     return None
 
+def read_in_chunks(file_object, chunk_size=8192):
+    """Generator to read file in chunks."""
+    while True:
+        chunk = file_object.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
 @st.cache_data
 def parse_chat_log_file(uploaded_file):
     """Parse WhatsApp chat log file with improved memory efficiency."""
@@ -122,10 +129,13 @@ def parse_chat_log_file(uploaded_file):
     events = []
     
     # Read file in chunks and process line by line
-    chunk_size = 8192  # Smaller chunk size for better memory management
     buffer = StringIO()
     
-    for chunk in uploaded_file.chunks(chunk_size):
+    # Create a bytes buffer for the uploaded file
+    bytes_data = uploaded_file.getvalue()
+    file_obj = BytesIO(bytes_data)
+    
+    for chunk in read_in_chunks(file_obj):
         try:
             text_chunk = chunk.decode('utf-8')
         except UnicodeDecodeError:
@@ -135,7 +145,10 @@ def parse_chat_log_file(uploaded_file):
         buffer.seek(0)
         
         lines = buffer.readlines()
-        buffer = StringIO(lines[-1] if lines else '')  # Keep incomplete last line
+        if lines:
+            buffer = StringIO(lines[-1])  # Keep incomplete last line
+        else:
+            buffer = StringIO()
         
         for line in lines[:-1]:  # Process complete lines
             result = process_line(line, patterns)
@@ -182,7 +195,54 @@ def parse_chat_log_file(uploaded_file):
         'left_members': len(member_status) - current_members
     }
 
-# [Previous create_member_timeline and display_events_table functions remain the same]
+@st.cache_data
+def create_member_timeline(stats):
+    """Create optimized timeline with membership events."""
+    if not stats['events']:
+        return pd.DataFrame()
+    
+    events_df = pd.DataFrame(stats['events'])
+    events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
+    events_df = events_df.sort_values('timestamp')
+    
+    member_count = 0
+    timeline_data = []
+    
+    for _, event in events_df.iterrows():
+        member_count += event['change']
+        event_text = f"{event['user']} {event['original_action']}"
+        if 'actor' in event:
+            event_text = f"{event['actor']} {event['original_action']} {event['user']}"
+            
+        timeline_data.append({
+            'Date': event['timestamp'],
+            'Member Count': member_count,
+            'Event': event_text,
+            'Event Type': event['event_type']
+        })
+    
+    return pd.DataFrame(timeline_data)
+
+@st.cache_data
+def display_events_table(stats):
+    """Display paginated membership events table."""
+    if not stats['events']:
+        return pd.DataFrame()
+    
+    events_df = pd.DataFrame(stats['events'])
+    events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
+    events_df = events_df.sort_values('timestamp', ascending=False)
+    
+    display_df = events_df.copy()
+    display_df['Date'] = display_df['timestamp'].dt.strftime('%d %b %Y')
+    display_df['Time'] = display_df['timestamp'].dt.strftime('%H:%M')
+    
+    display_df['Event Description'] = display_df.apply(
+        lambda x: f"{x['actor']} {x['original_action']} {x['user']}" if 'actor' in x else f"{x['user']} {x['original_action']}", 
+        axis=1
+    )
+    
+    return display_df[['Date', 'Time', 'Event Description', 'event_type']]
 
 def main():
     st.title("WhatsApp Chat Analyzer")
@@ -213,7 +273,90 @@ def main():
                 st.error("No valid messages or events found in the file. Please check the file format.")
                 return
             
-            # [Rest of the visualization code remains the same]
+            # Display membership metrics
+            st.header("Group Membership Analysis")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Members", stats['total_members'])
+            with col2:
+                st.metric("Current Members", stats['current_members'])
+            with col3:
+                st.metric("Left Members", stats['left_members'])
+            
+            # Membership Events Table with pagination
+            st.subheader("Membership Events")
+            events_df = display_events_table(stats)
+            if not events_df.empty:
+                ROWS_PER_PAGE = 50
+                total_pages = len(events_df) // ROWS_PER_PAGE + (1 if len(events_df) % ROWS_PER_PAGE > 0 else 0)
+                page = st.number_input("Page", min_value=1, max_value=total_pages, value=1)
+                
+                start_idx = (page - 1) * ROWS_PER_PAGE
+                end_idx = start_idx + ROWS_PER_PAGE
+                
+                tab1, tab2, tab3 = st.tabs(["All Events", "Exits Only", "Joins Only"])
+                
+                with tab1:
+                    st.dataframe(events_df[['Date', 'Time', 'Event Description']].iloc[start_idx:end_idx])
+                
+                with tab2:
+                    exits_df = events_df[events_df['event_type'] == 'exit']
+                    st.dataframe(exits_df[['Date', 'Time', 'Event Description']])
+                
+                with tab3:
+                    joins_df = events_df[events_df['event_type'] == 'join']
+                    st.dataframe(joins_df[['Date', 'Time', 'Event Description']])
+            
+            # Member Timeline Visualization
+            st.subheader("Member Count Timeline")
+            timeline_df = create_member_timeline(stats)
+            if not timeline_df.empty:
+                fig = go.Figure()
+                
+                fig.add_trace(go.Scatter(
+                    x=timeline_df['Date'],
+                    y=timeline_df['Member Count'],
+                    mode='lines',
+                    name='Member Count',
+                    line=dict(color='#2E86C1', width=2)
+                ))
+                
+                exits_df = timeline_df[timeline_df['Event Type'] == 'exit']
+                if not exits_df.empty:
+                    fig.add_trace(go.Scatter(
+                        x=exits_df['Date'],
+                        y=exits_df['Member Count'],
+                        mode='markers',
+                        name='Exit Events',
+                        marker=dict(
+                            color='red',
+                            size=8,
+                            symbol='diamond'
+                        ),
+                        hovertemplate="<b>%{text}</b><br>" +
+                                    "Date: %{x}<br>" +
+                                    "Members: %{y}<extra></extra>",
+                        text=exits_df['Event']
+                    ))
+                
+                fig.update_layout(
+                    title='Group Member Count Timeline with Exit Events',
+                    xaxis_title='Date',
+                    yaxis_title='Number of Members',
+                    hovermode='x unified',
+                    showlegend=True
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Message Analysis
+            st.header("Message Analysis")
+            if stats['messages_data']:
+                message_df = pd.DataFrame(list(stats['user_messages'].items()), 
+                                       columns=['Member', 'Messages'])
+                message_df = message_df.sort_values('Messages', ascending=False)
+                fig = px.bar(message_df, x='Member', y='Messages', 
+                            title='Messages per Member')
+                st.plotly_chart(fig, use_container_width=True)
             
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
