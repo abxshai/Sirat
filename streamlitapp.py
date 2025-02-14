@@ -60,10 +60,10 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_chat_log_file(uploaded_file):
-    """Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
+    """
+    Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
     
-    Dates are now parsed strictly (fuzzy=False) to ensure only the dates exactly
-    present in the text file are used.
+    Dates are parsed strictly (fuzzy=False) and the raw date string from the file is stored.
     """
     try:
         content = uploaded_file.read()
@@ -87,7 +87,7 @@ def parse_chat_log_file(uploaded_file):
     join_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
     )
-    # We'll detect exit events by searching for the keyword "left"
+    # Detect exit events by searching for the keyword "left"
     left_pattern = re.compile(
         r'(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?).*?(.*?)\s+left'
     )
@@ -111,7 +111,8 @@ def parse_chat_log_file(uploaded_file):
                 })
                 user_messages[user] += 1
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp}
+                    # Save both the parsed datetime and the raw string.
+                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
             except Exception:
                 continue
             continue
@@ -125,7 +126,7 @@ def parse_chat_log_file(uploaded_file):
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
                 user = clean_member_name(user)
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp}
+                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
             except Exception:
                 continue
         elif left_match:
@@ -135,14 +136,17 @@ def parse_chat_log_file(uploaded_file):
                 user = clean_member_name(user)
                 # Initialize user's record if not present.
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp}
-                # Instead of a single 'last_left', we now store a list of exit events.
+                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
+                # Instead of a single 'last_left', store a list of exit events (with raw strings)
                 if 'left_times' not in member_status[user]:
                     member_status[user]['left_times'] = []
+                    member_status[user]['left_times_str'] = []
                 member_status[user]['left_times'].append(timestamp)
-                exit_events.append({  # Track this exit event
+                member_status[user]['left_times_str'].append(timestamp_str)
+                exit_events.append({
                     'user': user,
-                    'timestamp': timestamp
+                    'timestamp': timestamp,
+                    'raw': timestamp_str
                 })
             except Exception:
                 continue
@@ -260,7 +264,7 @@ def create_wordcloud(selected_user, df):
 ##############################
 
 def create_member_activity_table(stats):
-    """Create activity status table with exit event counts."""
+    """Create activity status table with exit event counts using raw date strings."""
     activity_data = []
     for member, status in stats['member_status'].items():
         # Skip system notifications if present
@@ -274,8 +278,10 @@ def create_member_activity_table(stats):
             'Message Count': message_count,
             'Exit Events': exit_count,
             'Activity Status': 'Active' if message_count > 0 and not status.get('left_times') else 'Inactive',
-            'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Left Date': (min(status['left_times']).strftime('%d %b %Y') if status.get('left_times') else 'Present'),
+            # Use the raw join date from the file if available.
+            'Join Date': status.get('first_seen_str', status['first_seen'].strftime('%d %b %Y')),
+            # For left date, show the first exit raw string if available.
+            'Left Date': (status.get('left_times_str', [])[0] if status.get('left_times_str') else 'Present'),
             'Current Status': 'Left' if status.get('left_times') else 'Present'
         })
     df = pd.DataFrame(activity_data)
