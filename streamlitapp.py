@@ -304,19 +304,26 @@ def create_exit_events_table(stats):
     Create a separate table for left events.
     
     If strict left events (exactly matched) are available, use them; otherwise, fall back to general left events.
-    The table shows the user and the exact date/time (raw string) as it appears in the txt file.
+    The table shows the user and the date in the "date month year" format (e.g. "04 Apr 2022").
     """
     strict_events = stats.get('strict_exit_events', [])
     if strict_events:
         df = pd.DataFrame(strict_events)
-        return df[['User', 'Exact Date/Time']]
+        # Reformat the raw date string using dateutil parser and strftime.
+        df['Formatted Date'] = df['Exact Date/Time'].apply(
+            lambda x: date_parser.parse(x, fuzzy=False).strftime('%d %b %Y')
+        )
+        return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
     else:
         general_events = stats.get('exit_events', [])
         if not general_events:
             return pd.DataFrame()
         df = pd.DataFrame(general_events)
         df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
-        return df[['User', 'Exact Date/Time']]
+        df['Formatted Date'] = df['Exact Date/Time'].apply(
+            lambda x: date_parser.parse(x, fuzzy=False).strftime('%d %b %Y')
+        )
+        return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
 
 def create_member_activity_table(stats):
     """Create a table of member activity with join and left events."""
