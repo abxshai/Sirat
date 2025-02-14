@@ -48,7 +48,6 @@ def get_llm_reply(client, prompt, word_placeholder):
             top_p=1,
             stream=True
         )
-        
         response = ""
         for chunk in completion:
             delta = chunk.choices[0].delta.content or ""
@@ -309,7 +308,7 @@ def create_exit_events_table(stats):
     strict_events = stats.get('strict_exit_events', [])
     if strict_events:
         df = pd.DataFrame(strict_events)
-        # Reformat the raw date string using dateutil parser and strftime.
+        # Reformat the raw date string.
         df['Formatted Date'] = df['Exact Date/Time'].apply(
             lambda x: date_parser.parse(x, fuzzy=False).strftime('%d %b %Y')
         )
