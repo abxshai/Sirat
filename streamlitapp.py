@@ -63,6 +63,10 @@ def parse_chat_log_file(uploaded_file):
     """
     Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
     Dates are parsed strictly (fuzzy=False) and the raw date string is saved.
+    
+    In addition, we use a strict left pattern to capture only left messages
+    that exactly match the system message format. These are stored in the 
+    strict_exit_events list.
     """
     try:
         content = uploaded_file.read()
@@ -77,18 +81,23 @@ def parse_chat_log_file(uploaded_file):
     messages_data = []
     user_messages = Counter()
     member_status = {}
-    exit_events = []  # List to track each exit event
+    exit_events = []         # General exit events list
+    strict_exit_events = []  # List for strictly matched left messages
 
-    # Regular expression patterns
+    # Regular expression patterns for regular messages and join events.
     message_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
     )
     join_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
     )
-    # Detect exit events by searching for the keyword "left"
+    # A general left pattern (used if strict matching does not occur)
     left_pattern = re.compile(
         r'(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?).*?(.*?)\s+left'
+    )
+    # Strict left pattern: Must match the entire line format exactly.
+    strict_left_pattern = re.compile(
+        r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*(.*?):\s*(.*?)\s+left\s*$'
     )
 
     for line in text.splitlines():
@@ -96,6 +105,7 @@ def parse_chat_log_file(uploaded_file):
         if not line:
             continue
 
+        # First, check for a regular message.
         msg_match = message_pattern.match(line)
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
@@ -114,9 +124,8 @@ def parse_chat_log_file(uploaded_file):
                 continue
             continue
 
+        # Check for join events.
         join_match = join_pattern.match(line)
-        left_match = left_pattern.search(line)  # using search to find the keyword "left"
-
         if join_match:
             timestamp_str, user = join_match.groups()
             try:
@@ -126,7 +135,39 @@ def parse_chat_log_file(uploaded_file):
                     member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
             except Exception:
                 continue
-        elif left_match:
+            continue
+
+        # First try the strict left pattern.
+        strict_left_match = strict_left_pattern.match(line)
+        if strict_left_match:
+            raw_date_str, user, message_text = strict_left_match.groups()
+            try:
+                timestamp = date_parser.parse(raw_date_str, fuzzy=False)
+                user = clean_member_name(user)
+                strict_exit_events.append({
+                    'user': user,
+                    'raw': raw_date_str
+                })
+                # Also include in the general exit events and update member status.
+                if user not in member_status:
+                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': raw_date_str}
+                if 'left_times' not in member_status[user]:
+                    member_status[user]['left_times'] = []
+                    member_status[user]['left_times_str'] = []
+                member_status[user]['left_times'].append(timestamp)
+                member_status[user]['left_times_str'].append(raw_date_str)
+                exit_events.append({
+                    'user': user,
+                    'timestamp': timestamp,
+                    'raw': raw_date_str
+                })
+            except Exception:
+                continue
+            continue  # Skip further processing of this line.
+
+        # If strict pattern didn't match, try the general left pattern.
+        left_match = left_pattern.search(line)
+        if left_match:
             timestamp_str, user = left_match.groups()
             try:
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
@@ -157,7 +198,8 @@ def parse_chat_log_file(uploaded_file):
         'total_members': total_members,
         'current_members': current_members,
         'left_members': left_members,
-        'exit_events': exit_events
+        'exit_events': exit_events,
+        'strict_exit_events': strict_exit_events
     }
 
 def create_member_timeline(stats):
@@ -242,12 +284,13 @@ def create_wordcloud(selected_user, df):
 
 def create_exit_events_table(stats):
     """
-    Create a separate table for exit events (only system messages with "left"),
+    Create a separate table for strict exit events (system messages with "left" that exactly match the format),
     showing the exact timing (raw string) and the person who left.
     """
-    if not stats.get('exit_events'):
+    strict_events = stats.get('strict_exit_events', [])
+    if not strict_events:
         return pd.DataFrame()
-    df = pd.DataFrame(stats['exit_events'])
+    df = pd.DataFrame(strict_events)
     df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
     return df[['User', 'Exact Date/Time']]
 
@@ -339,7 +382,7 @@ def main():
             else:
                 st.write("No exit events recorded")
             
-            # NEW: Separate Exit Events Table
+            # NEW: Separate Exit Events Table for strictly matched left messages.
             st.markdown("### Exit Events Table")
             exit_events_table = create_exit_events_table(stats)
             if not exit_events_table.empty:
