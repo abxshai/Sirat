@@ -64,9 +64,11 @@ def parse_chat_log_file(uploaded_file):
     Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
     Dates are parsed strictly (fuzzy=False) and the raw date string is saved.
     
-    In addition, we use a strict left pattern to capture only left messages
-    that exactly match the system message format. These are stored in the 
-    strict_exit_events list.
+    We use two patterns for left events:
+      1. A strict pattern that must match the entire line (e.g. system left messages).
+      2. A general left pattern as a fallback.
+    
+    The strict matches are stored in the 'strict_exit_events' list for a separate table.
     """
     try:
         content = uploaded_file.read()
@@ -82,7 +84,7 @@ def parse_chat_log_file(uploaded_file):
     user_messages = Counter()
     member_status = {}
     exit_events = []         # General exit events list
-    strict_exit_events = []  # List for strictly matched left messages
+    strict_exit_events = []  # List for strictly matched left events
 
     # Regular expression patterns for regular messages and join events.
     message_pattern = re.compile(
@@ -91,13 +93,14 @@ def parse_chat_log_file(uploaded_file):
     join_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
     )
-    # A general left pattern (used if strict matching does not occur)
+    # General left pattern.
     left_pattern = re.compile(
         r'(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?).*?(.*?)\s+left'
     )
-    # Strict left pattern: Must match the entire line format exactly.
+    # Strict left pattern – it must match the whole line.
+    # Here we allow an optional invisible character (e.g., U+200E) after the colon.
     strict_left_pattern = re.compile(
-        r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*(.*?):\s*(.*?)\s+left\s*$'
+        r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*(.*?):\s*(?:\u200e)?(.*?)\s+left\s*$'
     )
 
     for line in text.splitlines():
@@ -148,7 +151,6 @@ def parse_chat_log_file(uploaded_file):
                     'user': user,
                     'raw': raw_date_str
                 })
-                # Also include in the general exit events and update member status.
                 if user not in member_status:
                     member_status[user] = {'first_seen': timestamp, 'first_seen_str': raw_date_str}
                 if 'left_times' not in member_status[user]:
@@ -310,10 +312,9 @@ def create_member_activity_table(stats):
             'Member Name': member,
             'Message Count': message_count,
             'Exit Events': exit_count,
-            'Activity Status': 'Active' if message_count > 0 and not status.get('left_times') else 'Inactive',
+            'Activity Status': 'Left' if status.get('left_times') else 'Active',
             'Join Date': status.get('first_seen_str', status['first_seen'].strftime('%d %b %Y')),
-            'Left Date': (status.get('left_times_str', [])[0] if status.get('left_times_str') else 'Present'),
-            'Current Status': 'Left' if status.get('left_times') else 'Present'
+            'Left Date': (status.get('left_times_str', [])[0] if status.get('left_times_str') else 'Present')
         })
     df = pd.DataFrame(activity_data)
     if not df.empty:
