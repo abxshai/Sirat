@@ -61,14 +61,15 @@ def get_llm_reply(client, prompt, word_placeholder):
 
 def parse_chat_log_file(uploaded_file):
     """
-    Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
-    Dates are parsed strictly (fuzzy=False) and the raw date string is saved.
+    Parse WhatsApp chat log file and extract messages, join events, and left events.
     
     We use two patterns for left events:
-      1. A strict pattern that must match the entire line (e.g. system left messages).
+      1. A strict pattern (strict_left_pattern) that exactly matches lines like:
+         [04/04/22, 9:29:17 PM] Renuka Kondhalkar_SW: ‎Renuka Kondhalkar_SW left
+         These events are stored in strict_exit_events.
       2. A general left pattern as a fallback.
     
-    The strict matches are stored in the 'strict_exit_events' list for a separate table.
+    The raw date strings (exactly as they appear) are stored alongside parsed datetimes.
     """
     try:
         content = uploaded_file.read()
@@ -83,22 +84,23 @@ def parse_chat_log_file(uploaded_file):
     messages_data = []
     user_messages = Counter()
     member_status = {}
-    exit_events = []         # General exit events list
-    strict_exit_events = []  # List for strictly matched left events
+    exit_events = []         # General left events (if not matched strictly)
+    strict_exit_events = []  # Left events that exactly match the strict pattern
 
-    # Regular expression patterns for regular messages and join events.
+    # Pattern for regular messages:
     message_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
     )
+    # Pattern for join events:
     join_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
     )
-    # General left pattern.
+    # General left pattern (fallback)
     left_pattern = re.compile(
         r'(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?).*?(.*?)\s+left'
     )
-    # Strict left pattern – it must match the whole line.
-    # Here we allow an optional invisible character (e.g., U+200E) after the colon.
+    # Strict left pattern: must match the entire line exactly.
+    # Allowing for an optional invisible character (e.g. \u200e) after the colon.
     strict_left_pattern = re.compile(
         r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*(.*?):\s*(?:\u200e)?(.*?)\s+left\s*$'
     )
@@ -108,7 +110,7 @@ def parse_chat_log_file(uploaded_file):
         if not line:
             continue
 
-        # First, check for a regular message.
+        # Check for a regular message.
         msg_match = message_pattern.match(line)
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
@@ -122,7 +124,10 @@ def parse_chat_log_file(uploaded_file):
                 })
                 user_messages[user] += 1
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'first_seen_str': timestamp_str
+                    }
             except Exception:
                 continue
             continue
@@ -135,7 +140,10 @@ def parse_chat_log_file(uploaded_file):
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
                 user = clean_member_name(user)
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'first_seen_str': timestamp_str
+                    }
             except Exception:
                 continue
             continue
@@ -143,16 +151,20 @@ def parse_chat_log_file(uploaded_file):
         # First try the strict left pattern.
         strict_left_match = strict_left_pattern.match(line)
         if strict_left_match:
-            raw_date_str, user, message_text = strict_left_match.groups()
+            raw_date_str, user, left_msg = strict_left_match.groups()
             try:
                 timestamp = date_parser.parse(raw_date_str, fuzzy=False)
                 user = clean_member_name(user)
                 strict_exit_events.append({
-                    'user': user,
-                    'raw': raw_date_str
+                    'User': user,
+                    'Exact Date/Time': raw_date_str
                 })
+                # Update member status
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': raw_date_str}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'first_seen_str': raw_date_str
+                    }
                 if 'left_times' not in member_status[user]:
                     member_status[user]['left_times'] = []
                     member_status[user]['left_times_str'] = []
@@ -165,7 +177,7 @@ def parse_chat_log_file(uploaded_file):
                 })
             except Exception:
                 continue
-            continue  # Skip further processing of this line.
+            continue  # Skip further processing for this line.
 
         # If strict pattern didn't match, try the general left pattern.
         left_match = left_pattern.search(line)
@@ -175,7 +187,10 @@ def parse_chat_log_file(uploaded_file):
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
                 user = clean_member_name(user)
                 if user not in member_status:
-                    member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
+                    member_status[user] = {
+                        'first_seen': timestamp,
+                        'first_seen_str': timestamp_str
+                    }
                 if 'left_times' not in member_status[user]:
                     member_status[user]['left_times'] = []
                     member_status[user]['left_times_str'] = []
@@ -205,7 +220,7 @@ def parse_chat_log_file(uploaded_file):
     }
 
 def create_member_timeline(stats):
-    """Create timeline with explicit join and exit events (each exit event subtracts one member)."""
+    """Create a timeline (DataFrame) showing join and left events with running totals."""
     events = []
     for member, status in stats['member_status'].items():
         if status.get('first_seen'):
@@ -239,7 +254,7 @@ def create_member_timeline(stats):
     return pd.DataFrame(timeline_data)
 
 def create_weekly_breakdown(stats):
-    """Simplified weekly breakdown without date parsing issues."""
+    """Create a weekly breakdown table of messages and member status."""
     if not stats['messages_data']:
         return pd.DataFrame()
     df = pd.DataFrame(stats['messages_data'])
@@ -286,14 +301,17 @@ def create_wordcloud(selected_user, df):
 
 def create_exit_events_table(stats):
     """
-    Create a separate table for strict exit events (system messages with "left" that exactly match the format),
-    showing the exact timing (raw string) and the person who left.
+    Create a separate table for strict exit events (only system left messages that exactly match the format).
+    This table shows the exact date/time (raw string) and the person who left.
     """
     strict_events = stats.get('strict_exit_events', [])
     if not strict_events:
         return pd.DataFrame()
     df = pd.DataFrame(strict_events)
-    df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
+    # Ensure the columns are named as desired.
+    df = df.rename(columns={'User': 'User', 'Exact Date/Time': 'Exact Date/Time'})
+    # Since we stored with keys 'User' and 'Exact Date/Time' already in strict_exit_events,
+    # simply return the DataFrame.
     return df[['User', 'Exact Date/Time']]
 
 ##############################
@@ -301,18 +319,16 @@ def create_exit_events_table(stats):
 ##############################
 
 def create_member_activity_table(stats):
-    """Create activity status table with exit event counts using raw date strings."""
+    """Create a table of member activity with join and left events."""
     activity_data = []
     for member, status in stats['member_status'].items():
-        if member == "group_notification":
-            continue
-        message_count = stats['user_messages'].get(member, 0)
-        exit_count = len(status.get('left_times', []))
+        # Mark as Left if there is any left event.
+        current_status = 'Left' if status.get('left_times') else 'Active'
         activity_data.append({
             'Member Name': member,
-            'Message Count': message_count,
-            'Exit Events': exit_count,
-            'Activity Status': 'Left' if status.get('left_times') else 'Active',
+            'Message Count': stats['user_messages'].get(member, 0),
+            'Exit Events': len(status.get('left_times', [])),
+            'Activity Status': current_status,
             'Join Date': status.get('first_seen_str', status['first_seen'].strftime('%d %b %Y')),
             'Left Date': (status.get('left_times_str', [])[0] if status.get('left_times_str') else 'Present')
         })
@@ -385,11 +401,11 @@ def main():
             
             # NEW: Separate Exit Events Table for strictly matched left messages.
             st.markdown("### Exit Events Table")
-            exit_events_table = create_exit_events_table(stats)
-            if not exit_events_table.empty:
-                st.dataframe(exit_events_table)
+            left_events_table = create_exit_events_table(stats)
+            if not left_events_table.empty:
+                st.dataframe(left_events_table)
             else:
-                st.write("No exit events available")
+                st.write("No strict left events available")
             
             st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
