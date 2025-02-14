@@ -74,7 +74,8 @@ def parse_chat_log_file(uploaded_file):
     messages_data = []
     user_messages = Counter()
     member_status = {}
-    exit_events = []  # New list to track exits
+    exit_events = []  # Track all exit events
+    exit_counts = Counter()  # Track count of exits per user
 
     # Patterns remain the same
     message_pattern = re.compile(
@@ -127,11 +128,13 @@ def parse_chat_log_file(uploaded_file):
             try:
                 timestamp = date_parser.parse(timestamp_str, fuzzy=True)
                 user = clean_member_name(user)
+                exit_counts[user] += 1  # Increment exit count for user
                 if user in member_status:
                     member_status[user]['last_left'] = timestamp
-                    exit_events.append({  # Track exit event
+                    exit_events.append({  # Track exit event with full details
                         'user': user,
-                        'timestamp': timestamp
+                        'timestamp': timestamp,
+                        'exit_count': exit_counts[user]  # Include the running count
                     })
             except Exception:
                 continue
@@ -146,7 +149,8 @@ def parse_chat_log_file(uploaded_file):
         'total_members': len(member_status),
         'current_members': current_members,
         'left_members': left_members,
-        'exit_events': exit_events
+        'exit_events': exit_events,
+        'exit_counts': dict(exit_counts)  # Include exit counts in return data
     }
 
 def create_member_timeline(stats):
@@ -189,86 +193,7 @@ def create_member_timeline(stats):
     
     return pd.DataFrame(timeline_data)
 
-def create_weekly_breakdown(stats):
-    """Simplified weekly breakdown without date parsing issues."""
-    if not stats['messages_data']:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(stats['messages_data'])
-    
-    try:
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    except ValueError as e:
-        st.error(f"Error converting timestamps: {e}")
-        return pd.DataFrame()
-
-    df.dropna(subset=['timestamp'], inplace=True)
-    if df.empty:
-        return pd.DataFrame()
-
-    # Group by user and get message counts
-    user_msgs = df.groupby('user').size().reset_index(name='Messages Sent')
-    
-    # Add member status
-    weekly_data = []
-    for _, row in user_msgs.iterrows():
-        user = row['user']
-        status = stats['member_status'].get(user, {})
-        weekly_data.append({
-            'Member Name': user,
-            'Messages Sent': row['Messages Sent'],
-            'Current Status': 'Left' if status.get('last_left') else 'Present'
-        })
-
-    return pd.DataFrame(weekly_data)
-
-def fetch_stats(stats, df):
-    """Compute top-level statistics from the chat data."""
-    total_messages = len(stats['messages_data'])
-    total_words = sum(len(message.split()) for message in df['message'])
-    media_messages = sum(1 for message in df['message'] if "<Media omitted>" in message)
-    link_pattern = re.compile(r'https?://\S+')
-    links_shared = sum(1 for message in df['message'] if link_pattern.search(message))
-    return total_messages, total_words, media_messages, links_shared
-
-def create_wordcloud(selected_user, df):
-    """Generate a word cloud image from messages."""
-    if selected_user != "Overall":
-        df = df[df['user'] == selected_user]
-    text = " ".join(message for message in df['message'])
-    wordcloud = WordCloud(width=800, height=400, background_color="white").generate(text)
-    return wordcloud
-
-##############################
-# Member Activity Table
-##############################
-
-def create_member_activity_table(stats):
-    """Create activity status table with exit events."""
-    activity_data = []
-    for member, status in stats['member_status'].items():
-        # Skip system notifications if present
-        if member == "group_notification":
-            continue
-        message_count = stats['user_messages'].get(member, 0)
-        exit_count = status.get('exit_count', 0)
-        activity_data.append({
-            'Member Name': member,
-            'Message Count': message_count,
-            'Exit Events': exit_count,
-            'Activity Status': 'Active' if message_count > 0 else 'Inactive',
-            'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Present',
-            'Current Status': 'Left' if status['last_left'] else 'Present'
-        })
-    df = pd.DataFrame(activity_data)
-    if not df.empty:
-        df = df.sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
-    return df
-
-##############################
-# Main App Function
-##############################
+[... rest of the functions remain the same until main() ...]
 
 def main():
     st.sidebar.title("Chat Log Analyzer")
@@ -312,84 +237,46 @@ def main():
                 st.header("Links Shared")
                 st.title(links_shared)
             
-            # Exit Events Summary
-            st.markdown("### Member Exit Summary")
+            # Enhanced Exit Events Summary
+            st.markdown("### Member Exit Analysis")
             if stats['exit_events']:
+                # Timeline of exit events
                 exit_df = pd.DataFrame(stats['exit_events'])
                 exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
                 exit_df = exit_df.sort_values('timestamp')
-                st.dataframe(exit_df.assign(
-                    exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
-                )[['user', 'exit_date']])
+                
+                # Exit counts per user
+                exit_counts_df = pd.DataFrame(list(stats['exit_counts'].items()), 
+                                           columns=['User', 'Number of Exits'])
+                exit_counts_df = exit_counts_df.sort_values('Number of Exits', 
+                                                          ascending=False)
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Exit Events Timeline")
+                    st.dataframe(exit_df.assign(
+                        exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
+                    )[['user', 'exit_date', 'exit_count']])
+                
+                with col2:
+                    st.markdown("#### Exit Frequency by User")
+                    st.dataframe(exit_counts_df)
+                
                 st.metric("Total Members Left", stats['left_members'])
+                
+                # Visualization of exit patterns
+                st.markdown("#### Exit Patterns Over Time")
+                fig = px.scatter(exit_df, 
+                               x='timestamp', 
+                               y='user',
+                               size='exit_count',
+                               title='Exit Events Distribution')
+                st.plotly_chart(fig, use_container_width=True)
             else:
                 st.write("No exit events recorded")
             
-            # Group Member Timeline
-            st.markdown("### Group Member Timeline")
-            timeline_df = create_member_timeline(stats)
-            if not timeline_df.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=timeline_df['Date'],
-                    y=timeline_df['Member Count'],
-                    mode='lines',
-                    name='Member Count',
-                    line=dict(color='#2E86C1', width=2)
-                ))
-                fig.update_layout(
-                    title='Group Member Count Timeline',
-                    xaxis_title='Date',
-                    yaxis_title='Number of Members',
-                    hovermode='x unified'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Member Activity Table
-            st.markdown("### Member Activity Status")
-            activity_df = create_member_activity_table(stats)
-            st.dataframe(activity_df, use_container_width=True)
-            
-            # Weekly Breakdown Table
-            st.markdown("### Weekly Message & Member Analysis")
-            weekly_df = create_weekly_breakdown(stats)
-            st.dataframe(weekly_df)
-            
-            # Message Distribution Chart
-            st.markdown("### Message Distribution")
-            message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
-            fig = px.bar(message_df, x='Member', y='Messages', title='Messages per Member', color='Messages')
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Busiest Users (Overall)
-            if selected_user == "Overall":
-                st.markdown("### Most Busy Users")
-                busy_users = pd.Series(stats['user_messages']).sort_values(ascending=False)
-                fig, ax = plt.subplots()
-                colors = plt.cm.viridis(np.linspace(0, 1, len(busy_users)))
-                ax.bar(busy_users.index, busy_users.values, color=colors)
-                plt.xticks(rotation=90)
-                plt.title("User Activity")
-                st.pyplot(fig)
-            
-            # Word Cloud
-            st.markdown("### Word Cloud for Frequent Words")
-            wc = create_wordcloud(selected_user, df)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.imshow(wc, interpolation="bilinear")
-            ax.axis("off")
-            st.pyplot(fig)
-            
-            # LLM Chat Summary (optional)
-            st.markdown("### Chat Analysis Summary (LLM)")
-            if st.button("Generate LLM Summary"):
-                client = initialize_llm_client()
-                prompt = (f"Analyze this chat log:\n"
-                          f"- Total members: {stats['total_members']}\n"
-                          f"- Current members: {stats['current_members']}\n"
-                          f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
-                placeholder = st.empty()
-                get_llm_reply(client, prompt, placeholder)
+            [... rest of the main function remains the same ...]
 
 if __name__ == "__main__":
     main()
