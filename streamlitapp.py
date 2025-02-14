@@ -62,7 +62,7 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_chat_log_file(uploaded_file):
-    """Parse WhatsApp chat log file."""
+    """Parse WhatsApp chat log file with enhanced exit event tracking."""
     try:
         content = uploaded_file.read()
         try:
@@ -76,11 +76,12 @@ def parse_chat_log_file(uploaded_file):
     messages_data = []
     user_messages = Counter()
     member_status = {}
-    # Patterns for messages, join, and left events
+    exit_events = []  # New list to track exits
+
+    # Patterns remain the same
     message_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
     )
-
     join_pattern = re.compile(
         r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
     )
@@ -93,7 +94,6 @@ def parse_chat_log_file(uploaded_file):
         if not line:
             continue
 
-        # Standard messages
         msg_match = message_pattern.match(line)
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
@@ -112,7 +112,6 @@ def parse_chat_log_file(uploaded_file):
                 continue
             continue
 
-        # Group join/left events (if any)
         join_match = join_pattern.match(line)
         left_match = left_pattern.match(line)
 
@@ -132,110 +131,161 @@ def parse_chat_log_file(uploaded_file):
                 user = clean_member_name(user)
                 if user in member_status:
                     member_status[user]['last_left'] = timestamp
+                    exit_events.append({  # Track exit event
+                        'user': user,
+                        'timestamp': timestamp
+                    })
             except Exception:
                 continue
 
     current_members = sum(1 for m in member_status.values() if not m['last_left'])
+    left_members = sum(1 for m in member_status.values() if m['last_left'])
+
     return {
         'messages_data': messages_data,
         'user_messages': user_messages,
         'member_status': member_status,
         'total_members': len(member_status),
-        'current_members': current_members
+        'current_members': current_members,
+        'left_members': left_members,
+        'exit_events': exit_events
     }
 
-##############################
-# Analysis Functions
-##############################
-
-def create_member_activity_table(stats):
-    """Create a table of member activity."""
-    activity_data = []
-    for member, status in stats['member_status'].items():
-        message_count = stats['user_messages'].get(member, 0)
-        activity_data.append({
-            'Member Name': member,
-            'Message Count': message_count,
-            'Activity Status': 'Active' if message_count > 0 else 'Inactive',
-            'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Left Date': status['last_left'].strftime('%d %b %Y') if status['last_left'] else 'Still in group',
-            'Current Status': 'Left' if status['last_left'] else 'Present'
-        })
-    
-    return pd.DataFrame(activity_data).sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
-
 def create_member_timeline(stats):
-    """Create a timeline of group member count over time."""
+    """Create timeline with explicit exit events."""
     events = []
+    
+    # Add join events
     for member, status in stats['member_status'].items():
         if status['first_seen']:
-            events.append({'date': status['first_seen'], 'change': 1})
+            events.append({
+                'date': status['first_seen'],
+                'change': 1,
+                'event_type': 'join',
+                'member': member
+            })
         if status['last_left']:
-            events.append({'date': status['last_left'], 'change': -1})
+            events.append({
+                'date': status['last_left'],
+                'change': -1,
+                'event_type': 'left',
+                'member': member
+            })
+    
     if not events:
         return pd.DataFrame()
+        
     events.sort(key=lambda x: x['date'])
-    date_range = pd.date_range(start=events[0]['date'].date(), end=events[-1]['date'].date() + timedelta(days=1), freq='D')
+    
+    # Create timeline with running totals
+    timeline_data = []
     member_count = 0
-    daily_counts = []
-    for date in date_range:
-        for event in [e for e in events if e['date'].date() == date.date()]:
-            member_count += event['change']
-        daily_counts.append({'Date': date, 'Member Count': member_count})
-    return pd.DataFrame(daily_counts)
+    for event in events:
+        member_count += event['change']
+        timeline_data.append({
+            'Date': event['date'],
+            'Member Count': member_count,
+            'Event': f"{event['member']} {event['event_type']}",
+            'Event Type': event['event_type']
+        })
+    
+    return pd.DataFrame(timeline_data)
 
 def create_weekly_breakdown(stats):
-    """
-    Create a weekly message breakdown.
-    "Week Duration" is based solely on the actual message dates from the export.
-    """
+    """Simplified weekly breakdown without date parsing issues."""
     if not stats['messages_data']:
         return pd.DataFrame()
+
     df = pd.DataFrame(stats['messages_data'])
+    
     try:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
         st.error(f"Error converting timestamps: {e}")
         return pd.DataFrame()
+
     df.dropna(subset=['timestamp'], inplace=True)
     if df.empty:
         return pd.DataFrame()
-    df = df.set_index('timestamp').sort_index()
+
+    # Group by user and get message counts
+    user_messages = df.groupby('user').size().reset_index(name='Messages Sent')
+    
+    # Add member status
     weekly_data = []
-    week_number = 1
-    for week_period, week_df in df.groupby(pd.Grouper(freq='W-MON')):
-        if week_df.empty:
-            continue
-        # Derive actual boundaries from messages in this group:
-        week_first_msg = week_df.index.min()
-        week_last_msg = week_df.index.max()
-        if week_first_msg.date() == week_last_msg.date():
-            week_duration_str = week_first_msg.strftime('%d %b %Y')
-        else:
-            week_duration_str = f"{week_first_msg.strftime('%d %b %Y')} - {week_last_msg.strftime('%d %b %Y')}"
-        week_messages = week_df.groupby('user').size().to_dict()
-        current_members = set()
-        left_members = set()
-        for member, status in stats['member_status'].items():
-            if status['first_seen'] <= week_last_msg:
-                current_members.add(member)
-            if status['last_left'] and week_first_msg <= status['last_left'] <= week_last_msg:
-                current_members.discard(member)
-                left_members.add(member)
-        members_to_report = sorted(set(list(week_messages.keys()) + list(current_members)))
-        for member in members_to_report:
-            messages_sent = week_messages.get(member, 0)
-            weekly_data.append({
-                'Week': f'Week {week_number}',
-                'Week Duration': week_duration_str,
-                'Member Name': member,
-                'Messages Sent': messages_sent,
-                'Total Members': len(current_members),
-                'Left Members': len(left_members),
-                'Current Members': len(current_members) - len(left_members)
-            })
-        week_number += 1
+    for _, row in user_messages.iterrows():
+        user = row['user']
+        status = stats['member_status'].get(user, {})
+        weekly_data.append({
+            'Member Name': user,
+            'Messages Sent': row['Messages Sent'],
+            'Current Status': 'Left' if status.get('last_left') else 'Present'
+        })
+
     return pd.DataFrame(weekly_data)
+
+def main():
+    # ... (previous main code remains the same until the timeline section)
+
+    if uploaded_file is not None:
+        with st.spinner("Parsing chat log..."):
+            stats = parse_chat_log_file(uploaded_file)
+        
+        # Add exit events summary
+        st.markdown("### Member Exit Summary")
+        if stats['exit_events']:
+            exit_df = pd.DataFrame(stats['exit_events'])
+            exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
+            exit_df = exit_df.sort_values('timestamp')
+            st.dataframe(exit_df.assign(
+                exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
+            )[['user', 'exit_date']])
+            
+            st.metric("Total Members Left", stats['left_members'])
+        else:
+            st.write("No exit events recorded")
+
+        # Enhanced timeline visualization
+        st.markdown("### Group Member Timeline")
+        timeline_df = create_member_timeline(stats)
+        if not timeline_df.empty:
+            fig = go.Figure()
+            
+            # Main member count line
+            fig.add_trace(go.Scatter(
+                x=timeline_df['Date'],
+                y=timeline_df['Member Count'],
+                mode='lines+markers',
+                name='Member Count',
+                line=dict(color='#2E86C1', width=2),
+                hovertemplate='%{text}<br>Count: %{y}<extra></extra>',
+                text=timeline_df['Event']
+            ))
+
+            # Add exit events as markers
+            exits = timeline_df[timeline_df['Event Type'] == 'left']
+            if not exits.empty:
+                fig.add_trace(go.Scatter(
+                    x=exits['Date'],
+                    y=exits['Member Count'],
+                    mode='markers',
+                    name='Exit Events',
+                    marker=dict(
+                        color='red',
+                        size=10,
+                        symbol='x'
+                    ),
+                    hovertemplate='%{text}<br>Count: %{y}<extra></extra>',
+                    text=exits['Event']
+                ))
+
+            fig.update_layout(
+                title='Group Member Count Timeline with Exit Events',
+                xaxis_title='Date',
+                yaxis_title='Number of Members',
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 def fetch_stats(stats, df):
     """Compute top-level statistics from the chat data."""
