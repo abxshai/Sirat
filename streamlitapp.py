@@ -209,11 +209,11 @@ def create_weekly_breakdown(stats):
         return pd.DataFrame()
 
     # Group by user and get message counts
-    user_messages = df.groupby('user').size().reset_index(name='Messages Sent')
+    user_msgs = df.groupby('user').size().reset_index(name='Messages Sent')
     
     # Add member status
     weekly_data = []
-    for _, row in user_messages.iterrows():
+    for _, row in user_msgs.iterrows():
         user = row['user']
         status = stats['member_status'].get(user, {})
         weekly_data.append({
@@ -224,78 +224,11 @@ def create_weekly_breakdown(stats):
 
     return pd.DataFrame(weekly_data)
 
-def main():
-    # ... (previous main code remains the same until the timeline section)
-
-    if uploaded_file is not None:
-        with st.spinner("Parsing chat log..."):
-            stats = parse_chat_log_file(uploaded_file)
-        
-        # Add exit events summary
-        st.markdown("### Member Exit Summary")
-        if stats['exit_events']:
-            exit_df = pd.DataFrame(stats['exit_events'])
-            exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
-            exit_df = exit_df.sort_values('timestamp')
-            st.dataframe(exit_df.assign(
-                exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
-            )[['user', 'exit_date']])
-            
-            st.metric("Total Members Left", stats['left_members'])
-        else:
-            st.write("No exit events recorded")
-
-        # Enhanced timeline visualization
-        st.markdown("### Group Member Timeline")
-        timeline_df = create_member_timeline(stats)
-        if not timeline_df.empty:
-            fig = go.Figure()
-            
-            # Main member count line
-            fig.add_trace(go.Scatter(
-                x=timeline_df['Date'],
-                y=timeline_df['Member Count'],
-                mode='lines+markers',
-                name='Member Count',
-                line=dict(color='#2E86C1', width=2),
-                hovertemplate='%{text}<br>Count: %{y}<extra></extra>',
-                text=timeline_df['Event']
-            ))
-
-            # Add exit events as markers
-            exits = timeline_df[timeline_df['Event Type'] == 'left']
-            if not exits.empty:
-                fig.add_trace(go.Scatter(
-                    x=exits['Date'],
-                    y=exits['Member Count'],
-                    mode='markers',
-                    name='Exit Events',
-                    marker=dict(
-                        color='red',
-                        size=10,
-                        symbol='x'
-                    ),
-                    hovertemplate='%{text}<br>Count: %{y}<extra></extra>',
-                    text=exits['Event']
-                ))
-
-            fig.update_layout(
-                title='Group Member Count Timeline with Exit Events',
-                xaxis_title='Date',
-                yaxis_title='Number of Members',
-                hovermode='x unified'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
 def fetch_stats(stats, df):
     """Compute top-level statistics from the chat data."""
-    # Total messages from parsed data
     total_messages = len(stats['messages_data'])
-    # Total words
     total_words = sum(len(message.split()) for message in df['message'])
-    # Count media messages: common WhatsApp export text "<Media omitted>" (adjust if needed)
     media_messages = sum(1 for message in df['message'] if "<Media omitted>" in message)
-    # Count links using a simple regex (matches http/https)
     link_pattern = re.compile(r'https?://\S+')
     links_shared = sum(1 for message in df['message'] if link_pattern.search(message))
     return total_messages, total_words, media_messages, links_shared
@@ -354,8 +287,21 @@ def main():
                 st.header("Links Shared")
                 st.title(links_shared)
             
-            # Member Count Timeline (using our existing timeline)
-            st.markdown("### Group Member Count Over Time")
+            # Exit Events Summary
+            st.markdown("### Member Exit Summary")
+            if stats['exit_events']:
+                exit_df = pd.DataFrame(stats['exit_events'])
+                exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
+                exit_df = exit_df.sort_values('timestamp')
+                st.dataframe(exit_df.assign(
+                    exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
+                )[['user', 'exit_date']])
+                st.metric("Total Members Left", stats['left_members'])
+            else:
+                st.write("No exit events recorded")
+            
+            # Group Member Timeline
+            st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
             if not timeline_df.empty:
                 fig = go.Figure()
@@ -390,7 +336,7 @@ def main():
             fig = px.bar(message_df, x='Member', y='Messages', title='Messages per Member', color='Messages')
             st.plotly_chart(fig, use_container_width=True)
             
-            # Busiest Users (for overall analysis)
+            # Busiest Users (Overall)
             if selected_user == "Overall":
                 st.markdown("### Most Busy Users")
                 busy_users = pd.Series(stats['user_messages']).sort_values(ascending=False)
