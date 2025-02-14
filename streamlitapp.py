@@ -167,7 +167,7 @@ def main():
                           f"- Top contributors: {dict(Counter(stats['user_messages']).most_common(5))}\n")
                 placeholder = st.empty()
                 get_llm_reply(client, prompt, placeholder)
-    def parse_chat_log_file(uploaded_file):
+def parse_chat_log_file(uploaded_file):
     """Parse WhatsApp chat log file with enhanced event tracking."""
     try:
         content = uploaded_file.read()
