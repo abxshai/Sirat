@@ -69,6 +69,7 @@ def parse_chat_log_file(uploaded_file):
       2. A general left pattern as a fallback.
     
     The raw date strings (exactly as they appear) are saved.
+    Note: All date parsing uses dayfirst=True.
     """
     try:
         content = uploaded_file.read()
@@ -114,7 +115,7 @@ def parse_chat_log_file(uploaded_file):
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
             try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=False)
+                timestamp = date_parser.parse(timestamp_str, fuzzy=False, dayfirst=True)
                 user = clean_member_name(user)
                 messages_data.append({
                     "timestamp": timestamp,
@@ -136,7 +137,7 @@ def parse_chat_log_file(uploaded_file):
         if join_match:
             timestamp_str, user = join_match.groups()
             try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=False)
+                timestamp = date_parser.parse(timestamp_str, fuzzy=False, dayfirst=True)
                 user = clean_member_name(user)
                 if user not in member_status:
                     member_status[user] = {
@@ -152,7 +153,7 @@ def parse_chat_log_file(uploaded_file):
         if strict_left_match:
             raw_date_str, user, left_msg = strict_left_match.groups()
             try:
-                timestamp = date_parser.parse(raw_date_str, fuzzy=False)
+                timestamp = date_parser.parse(raw_date_str, fuzzy=False, dayfirst=True)
                 user = clean_member_name(user)
                 strict_exit_events.append({
                     'User': user,
@@ -183,7 +184,7 @@ def parse_chat_log_file(uploaded_file):
         if left_match:
             timestamp_str, user = left_match.groups()
             try:
-                timestamp = date_parser.parse(timestamp_str, fuzzy=False)
+                timestamp = date_parser.parse(timestamp_str, fuzzy=False, dayfirst=True)
                 user = clean_member_name(user)
                 if user not in member_status:
                     member_status[user] = {
@@ -308,9 +309,8 @@ def create_exit_events_table(stats):
     strict_events = stats.get('strict_exit_events', [])
     if strict_events:
         df = pd.DataFrame(strict_events)
-        # Reformat the raw date string.
         df['Formatted Date'] = df['Exact Date/Time'].apply(
-            lambda x: date_parser.parse(x, fuzzy=False).strftime('%d %b %Y')
+            lambda x: date_parser.parse(x, fuzzy=False, dayfirst=True).strftime('%d %b %Y')
         )
         return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
     else:
@@ -320,7 +320,7 @@ def create_exit_events_table(stats):
         df = pd.DataFrame(general_events)
         df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
         df['Formatted Date'] = df['Exact Date/Time'].apply(
-            lambda x: date_parser.parse(x, fuzzy=False).strftime('%d %b %Y')
+            lambda x: date_parser.parse(x, fuzzy=False, dayfirst=True).strftime('%d %b %Y')
         )
         return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
 
