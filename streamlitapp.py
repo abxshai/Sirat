@@ -131,10 +131,8 @@ def parse_chat_log_file(uploaded_file):
             try:
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
                 user = clean_member_name(user)
-                # Initialize user's record if not present.
                 if user not in member_status:
                     member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
-                # Store a list of exit events (with raw strings)
                 if 'left_times' not in member_status[user]:
                     member_status[user]['left_times'] = []
                     member_status[user]['left_times_str'] = []
@@ -149,9 +147,7 @@ def parse_chat_log_file(uploaded_file):
                 continue
 
     total_members = len(member_status)
-    # Unique members that have left at least once.
     left_members = sum(1 for m in member_status.values() if m.get('left_times'))
-    # For current members, assume that if a member has left at least once, they are not currently in the group.
     current_members = total_members - left_members
 
     return {
@@ -167,8 +163,6 @@ def parse_chat_log_file(uploaded_file):
 def create_member_timeline(stats):
     """Create timeline with explicit join and exit events (each exit event subtracts one member)."""
     events = []
-    
-    # Add join events and each exit event from the member_status.
     for member, status in stats['member_status'].items():
         if status.get('first_seen'):
             events.append({
@@ -177,7 +171,6 @@ def create_member_timeline(stats):
                 'event_type': 'join',
                 'member': member
             })
-        # Add each exit event if available.
         if 'left_times' in status:
             for lt in status['left_times']:
                 events.append({
@@ -186,13 +179,9 @@ def create_member_timeline(stats):
                     'event_type': 'left',
                     'member': member
                 })
-    
     if not events:
         return pd.DataFrame()
-        
     events.sort(key=lambda x: x['date'])
-    
-    # Create timeline with running totals
     timeline_data = []
     member_count = 0
     for event in events:
@@ -203,30 +192,22 @@ def create_member_timeline(stats):
             'Event': f"{event['member']} {event['event_type']}",
             'Event Type': event['event_type']
         })
-    
     return pd.DataFrame(timeline_data)
 
 def create_weekly_breakdown(stats):
     """Simplified weekly breakdown without date parsing issues."""
     if not stats['messages_data']:
         return pd.DataFrame()
-
     df = pd.DataFrame(stats['messages_data'])
-    
     try:
         df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     except ValueError as e:
         st.error(f"Error converting timestamps: {e}")
         return pd.DataFrame()
-
     df.dropna(subset=['timestamp'], inplace=True)
     if df.empty:
         return pd.DataFrame()
-
-    # Group by user and get message counts
     user_msgs = df.groupby('user').size().reset_index(name='Messages Sent')
-    
-    # Add member status info
     weekly_data = []
     for _, row in user_msgs.iterrows():
         user = row['user']
@@ -236,7 +217,6 @@ def create_weekly_breakdown(stats):
             'Messages Sent': row['Messages Sent'],
             'Current Status': 'Left' if status.get('left_times') else 'Present'
         })
-
     return pd.DataFrame(weekly_data)
 
 def fetch_stats(stats, df):
@@ -262,15 +242,14 @@ def create_wordcloud(selected_user, df):
 
 def create_exit_events_table(stats):
     """
-    Create a separate table for exit events (system messages containing "left"),
-    showing the exact timing and dates (using the raw string) and the person who left.
+    Create a separate table for exit events (only system messages with "left"),
+    showing the exact timing (raw string) and the person who left.
     """
     if not stats.get('exit_events'):
         return pd.DataFrame()
     df = pd.DataFrame(stats['exit_events'])
-    # Rename columns for clarity
+    # Rename columns for clarity; display only the user and the exact date/time as it appears in the file.
     df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
-    # Optionally, drop the parsed timestamp column if not needed:
     return df[['User', 'Exact Date/Time']]
 
 ##############################
@@ -343,29 +322,25 @@ def main():
                 st.header("Links Shared")
                 st.title(links_shared)
             
-            # Exit Events Summary (Existing)
+            # Existing Exit Events Summary
             st.markdown("### Member Exit Summary")
             if stats['exit_events']:
                 exit_df = pd.DataFrame(stats['exit_events'])
                 exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
                 exit_df = exit_df.sort_values('timestamp')
-                
                 exit_counts = exit_df['user'].value_counts().reset_index()
                 exit_counts.columns = ['User', 'Number of Exits']
-                
                 st.markdown("#### Exit Events Timeline")
                 st.dataframe(exit_df.assign(
                     exit_date=exit_df['timestamp'].dt.strftime('%d %b %Y')
                 )[['user', 'exit_date']])
-                
                 st.markdown("#### Exit Events Count")
                 st.dataframe(exit_counts)
-                
                 st.metric("Total Members Left", stats['left_members'])
             else:
                 st.write("No exit events recorded")
             
-            # NEW: Separate Exit Events Table (System messages with "left")
+            # NEW: Separate Exit Events Table
             st.markdown("### Exit Events Table")
             exit_events_table = create_exit_events_table(stats)
             if not exit_events_table.empty:
@@ -373,7 +348,6 @@ def main():
             else:
                 st.write("No exit events available")
             
-            # Group Member Timeline
             st.markdown("### Group Member Timeline")
             timeline_df = create_member_timeline(stats)
             if not timeline_df.empty:
