@@ -62,8 +62,7 @@ def get_llm_reply(client, prompt, word_placeholder):
 def parse_chat_log_file(uploaded_file):
     """
     Parse WhatsApp chat log file and count exit events based on the 'left' keyword.
-    
-    Dates are parsed strictly (fuzzy=False) and the raw date string from the file is stored.
+    Dates are parsed strictly (fuzzy=False) and the raw date string is saved.
     """
     try:
         content = uploaded_file.read()
@@ -101,7 +100,6 @@ def parse_chat_log_file(uploaded_file):
         if msg_match:
             timestamp_str, user, message = msg_match.groups()
             try:
-                # Strict parsing: fuzzy=False
                 timestamp = date_parser.parse(timestamp_str, fuzzy=False)
                 user = clean_member_name(user)
                 messages_data.append({
@@ -111,7 +109,6 @@ def parse_chat_log_file(uploaded_file):
                 })
                 user_messages[user] += 1
                 if user not in member_status:
-                    # Save both the parsed datetime and the raw string.
                     member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
             except Exception:
                 continue
@@ -137,7 +134,7 @@ def parse_chat_log_file(uploaded_file):
                 # Initialize user's record if not present.
                 if user not in member_status:
                     member_status[user] = {'first_seen': timestamp, 'first_seen_str': timestamp_str}
-                # Instead of a single 'last_left', store a list of exit events (with raw strings)
+                # Store a list of exit events (with raw strings)
                 if 'left_times' not in member_status[user]:
                     member_status[user]['left_times'] = []
                     member_status[user]['left_times_str'] = []
@@ -260,6 +257,23 @@ def create_wordcloud(selected_user, df):
     return wordcloud
 
 ##############################
+# Exit Events Table Function
+##############################
+
+def create_exit_events_table(stats):
+    """
+    Create a separate table for exit events (system messages containing "left"),
+    showing the exact timing and dates (using the raw string) and the person who left.
+    """
+    if not stats.get('exit_events'):
+        return pd.DataFrame()
+    df = pd.DataFrame(stats['exit_events'])
+    # Rename columns for clarity
+    df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
+    # Optionally, drop the parsed timestamp column if not needed:
+    return df[['User', 'Exact Date/Time']]
+
+##############################
 # Member Activity Table
 ##############################
 
@@ -267,20 +281,16 @@ def create_member_activity_table(stats):
     """Create activity status table with exit event counts using raw date strings."""
     activity_data = []
     for member, status in stats['member_status'].items():
-        # Skip system notifications if present
         if member == "group_notification":
             continue
         message_count = stats['user_messages'].get(member, 0)
-        # Count the exit events from left_times if available.
         exit_count = len(status.get('left_times', []))
         activity_data.append({
             'Member Name': member,
             'Message Count': message_count,
             'Exit Events': exit_count,
             'Activity Status': 'Active' if message_count > 0 and not status.get('left_times') else 'Inactive',
-            # Use the raw join date from the file if available.
             'Join Date': status.get('first_seen_str', status['first_seen'].strftime('%d %b %Y')),
-            # For left date, show the first exit raw string if available.
             'Left Date': (status.get('left_times_str', [])[0] if status.get('left_times_str') else 'Present'),
             'Current Status': 'Left' if status.get('left_times') else 'Present'
         })
@@ -304,13 +314,11 @@ def main():
             st.error("Error parsing the file.")
             return
         
-        # Build a DataFrame from messages_data for additional stats and visualizations
         df = pd.DataFrame(stats['messages_data'])
         if df.empty:
             st.error("No messages found.")
             return
         
-        # Extract unique users (filter out notifications if any)
         user_list = list(stats['user_messages'].keys())
         if "group_notification" in user_list:
             user_list.remove("group_notification")
@@ -335,14 +343,13 @@ def main():
                 st.header("Links Shared")
                 st.title(links_shared)
             
-            # Exit Events Summary
+            # Exit Events Summary (Existing)
             st.markdown("### Member Exit Summary")
             if stats['exit_events']:
                 exit_df = pd.DataFrame(stats['exit_events'])
                 exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
                 exit_df = exit_df.sort_values('timestamp')
                 
-                # Count exit events per user
                 exit_counts = exit_df['user'].value_counts().reset_index()
                 exit_counts.columns = ['User', 'Number of Exits']
                 
@@ -357,6 +364,14 @@ def main():
                 st.metric("Total Members Left", stats['left_members'])
             else:
                 st.write("No exit events recorded")
+            
+            # NEW: Separate Exit Events Table (System messages with "left")
+            st.markdown("### Exit Events Table")
+            exit_events_table = create_exit_events_table(stats)
+            if not exit_events_table.empty:
+                st.dataframe(exit_events_table)
+            else:
+                st.write("No exit events available")
             
             # Group Member Timeline
             st.markdown("### Group Member Timeline")
@@ -378,23 +393,19 @@ def main():
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Member Activity Table
             st.markdown("### Member Activity Status")
             activity_df = create_member_activity_table(stats)
             st.dataframe(activity_df, use_container_width=True)
             
-            # Weekly Breakdown Table
             st.markdown("### Weekly Message & Member Analysis")
             weekly_df = create_weekly_breakdown(stats)
             st.dataframe(weekly_df)
             
-            # Message Distribution Chart
             st.markdown("### Message Distribution")
             message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
             fig = px.bar(message_df, x='Member', y='Messages', title='Messages per Member', color='Messages')
             st.plotly_chart(fig, use_container_width=True)
             
-            # Busiest Users (Overall)
             if selected_user == "Overall":
                 st.markdown("### Most Busy Users")
                 busy_users = pd.Series(stats['user_messages']).sort_values(ascending=False)
@@ -405,7 +416,6 @@ def main():
                 plt.title("User Activity")
                 st.pyplot(fig)
             
-            # Word Cloud
             st.markdown("### Word Cloud for Frequent Words")
             wc = create_wordcloud(selected_user, df)
             fig, ax = plt.subplots(figsize=(10, 5))
@@ -413,7 +423,6 @@ def main():
             ax.axis("off")
             st.pyplot(fig)
             
-            # LLM Chat Summary (optional)
             st.markdown("### Chat Analysis Summary (LLM)")
             if st.button("Generate LLM Summary"):
                 client = initialize_llm_client()
