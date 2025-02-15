@@ -9,6 +9,7 @@ from dateutil import parser as date_parser
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import numpy as np
+import io
 
 ##############################
 # Basic Functions & Preprocessing
@@ -70,13 +71,12 @@ def parse_chat_log_file(uploaded_file):
     
     The raw date strings (exactly as they appear) are saved.
     Note: All date parsing uses dayfirst=True.
+    
+    This version streams the file line by line to handle larger files efficiently.
     """
     try:
-        content = uploaded_file.read()
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError:
-            text = content.decode("latin-1")
+        # Stream the uploaded file line by line instead of reading it all into memory
+        text_file = io.TextIOWrapper(uploaded_file, encoding="utf-8", errors="replace")
     except Exception as e:
         st.error(f"Error reading file: {str(e)}")
         return None
@@ -105,7 +105,7 @@ def parse_chat_log_file(uploaded_file):
         r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
     )
 
-    for line in text.splitlines():
+    for line in text_file:
         line = line.strip()
         if not line:
             continue
@@ -301,28 +301,27 @@ def create_wordcloud(selected_user, df):
 
 def create_exit_events_table(stats):
     """
-    Create a separate table for left events.
+    Create a separate table for exit events with two columns:
+    | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
     
-    If strict left events (exactly matched) are available, use them; otherwise, fall back to general left events.
-    The table shows the user and the date in the "date month year" format (e.g. "04 Apr 2022").
+    This table uses the raw timestamp text from the chat log.
     """
-    strict_events = stats.get('strict_exit_events', [])
-    if strict_events:
-        df = pd.DataFrame(strict_events)
-        df['Formatted Date'] = df['Exact Date/Time'].apply(
-            lambda x: date_parser.parse(x, fuzzy=False, dayfirst=True).strftime('%d %b %Y')
-        )
-        return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
+    if stats.get('strict_exit_events'):
+        df = pd.DataFrame(stats['strict_exit_events'])
+        df = df.rename(columns={
+            "User": "Name of Exit Person", 
+            "Exact Date/Time": "Exit Date & Time"
+        })
+        return df[["Name of Exit Person", "Exit Date & Time"]]
+    elif stats.get('exit_events'):
+        df = pd.DataFrame(stats['exit_events'])
+        df = df.rename(columns={
+            "user": "Name of Exit Person", 
+            "raw": "Exit Date & Time"
+        })
+        return df[["Name of Exit Person", "Exit Date & Time"]]
     else:
-        general_events = stats.get('exit_events', [])
-        if not general_events:
-            return pd.DataFrame()
-        df = pd.DataFrame(general_events)
-        df = df.rename(columns={'user': 'User', 'raw': 'Exact Date/Time'})
-        df['Formatted Date'] = df['Exact Date/Time'].apply(
-            lambda x: date_parser.parse(x, fuzzy=False, dayfirst=True).strftime('%d %b %Y')
-        )
-        return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exact Date'})
+        return pd.DataFrame()
 
 def create_member_activity_table(stats):
     """Create a table of member activity with join and left events."""
@@ -386,7 +385,7 @@ def main():
                 st.header("Links Shared")
                 st.title(links_shared)
             
-            # Existing Exit Events Summary
+            # Existing Exit Events Summary (for reference)
             st.markdown("### Member Exit Summary")
             if stats['exit_events']:
                 exit_df = pd.DataFrame(stats['exit_events'])
