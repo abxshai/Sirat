@@ -1,9 +1,10 @@
 streamlit
 pandas
 plotly
-matplotlib
-groq
 python-dateutil
-seaborn
+wordcloud
+matplotlib
 numpy
+groq
+Pillow
 
