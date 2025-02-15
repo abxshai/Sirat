@@ -9,7 +9,6 @@ from dateutil import parser as date_parser
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import numpy as np
-import io
 
 ##############################
 # Basic Functions & Preprocessing
@@ -71,12 +70,13 @@ def parse_chat_log_file(uploaded_file):
     
     The raw date strings (exactly as they appear) are saved.
     Note: All date parsing uses dayfirst=True.
-    
-    This version streams the file line by line to handle larger files efficiently.
     """
     try:
-        # Stream the uploaded file line by line instead of reading it all into memory
-        text_file = io.TextIOWrapper(uploaded_file, encoding="utf-8", errors="replace")
+        content = uploaded_file.read()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1")
     except Exception as e:
         st.error(f"Error reading file: {str(e)}")
         return None
@@ -105,7 +105,7 @@ def parse_chat_log_file(uploaded_file):
         r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
     )
 
-    for line in text_file:
+    for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
