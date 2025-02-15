@@ -309,14 +309,14 @@ def create_exit_events_table(stats):
     if stats.get('strict_exit_events'):
         df = pd.DataFrame(stats['strict_exit_events'])
         df = df.rename(columns={
-            "User": "Name of Exit Person", 
+            "User": "Name of Exit Person",
             "Exact Date/Time": "Exit Date & Time"
         })
         return df[["Name of Exit Person", "Exit Date & Time"]]
     elif stats.get('exit_events'):
         df = pd.DataFrame(stats['exit_events'])
         df = df.rename(columns={
-            "user": "Name of Exit Person", 
+            "user": "Name of Exit Person",
             "raw": "Exit Date & Time"
         })
         return df[["Name of Exit Person", "Exit Date & Time"]]
