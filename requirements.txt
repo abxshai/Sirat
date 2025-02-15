@@ -1,10 +1,8 @@
 streamlit
 pandas
 plotly
-python-dateutil
-wordcloud
 matplotlib
-numpy
 groq
-Pillow
-
+python-dateutil
+seaborn
+numpy
