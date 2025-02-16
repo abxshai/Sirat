@@ -115,11 +115,33 @@ def process_chunk(chunk, patterns):
     
     return messages, joins, exits
 
-def parse_chat_log_file(uploaded_file, chunk_size=1024*1024):
+def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file with improved performance for large files.
-    Uses chunked processing and parallel execution.
+    Instead of splitting by character count, this version reads all lines,
+    then groups them into chunks (by number of lines) so that no line is split.
     """
+    try:
+        # Read the entire file as text
+        content = uploaded_file.read()
+        try:
+            text = content.decode("utf-8")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1")
+    except Exception as e:
+        st.error(f"Error reading file: {str(e)}")
+        return None
+
+    # Split text into complete lines
+    lines = text.splitlines()
+    
+    # Create chunks of complete lines
+    chunks = []
+    for i in range(0, len(lines), lines_per_chunk):
+        chunk = "\n".join(lines[i:i+lines_per_chunk])
+        chunks.append(chunk)
+    
+    # Define regex patterns for messages, joins, and left events
     patterns = {
         'message': re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
@@ -131,81 +153,65 @@ def parse_chat_log_file(uploaded_file, chunk_size=1024*1024):
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) left'
         )
     }
+    
+    # Process chunks in parallel
+    all_messages = []
+    all_joins = []
+    all_exits = []
+    
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(process_chunk, chunk, patterns) for chunk in chunks]
+        for future in concurrent.futures.as_completed(futures):
+            messages, joins, exits = future.result()
+            all_messages.extend(messages)
+            all_joins.extend(joins)
+            all_exits.extend(exits)
 
-    try:
-        # Read file content
-        content = uploaded_file.read()
-        try:
-            text = content.decode("utf-8")
-        except UnicodeDecodeError:
-            text = content.decode("latin-1")
+    # Sort all events by timestamp
+    all_messages.sort(key=lambda x: x['timestamp'])
+    all_joins.sort(key=lambda x: x['timestamp'])
+    all_exits.sort(key=lambda x: x['timestamp'])
 
-        # Split into chunks
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        
-        # Process chunks in parallel
-        all_messages = []
-        all_joins = []
-        all_exits = []
-        
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = [executor.submit(process_chunk, chunk, patterns) for chunk in chunks]
-            for future in concurrent.futures.as_completed(futures):
-                messages, joins, exits = future.result()
-                all_messages.extend(messages)
-                all_joins.extend(joins)
-                all_exits.extend(exits)
+    # Calculate statistics
+    user_messages = Counter(msg['user'] for msg in all_messages)
+    member_status = {}
 
-        # Sort all events by timestamp
-        all_messages.sort(key=lambda x: x['timestamp'])
-        all_joins.sort(key=lambda x: x['timestamp'])
-        all_exits.sort(key=lambda x: x['timestamp'])
+    # Process member status from join events and messages
+    for event in all_joins + all_messages:
+        user = event['user']
+        if user not in member_status:
+            member_status[user] = {
+                'first_seen': event['timestamp'],
+                'first_seen_str': event['timestamp_str']
+            }
 
-        # Calculate statistics
-        user_messages = Counter(msg['user'] for msg in all_messages)
-        member_status = {}
+    # Process exit events (recording all exit occurrences with raw timestamp strings)
+    for exit_event in all_exits:
+        user = exit_event['user']
+        if user not in member_status:
+            member_status[user] = {
+                'first_seen': exit_event['timestamp'],
+                'first_seen_str': exit_event['timestamp_str']
+            }
+        if 'left_times' not in member_status[user]:
+            member_status[user]['left_times'] = []
+            member_status[user]['left_times_str'] = []
+        member_status[user]['left_times'].append(exit_event['timestamp'])
+        member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
 
-        # Process member status
-        for event in all_joins + all_messages:
-            user = event['user']
-            if user not in member_status:
-                member_status[user] = {
-                    'first_seen': event['timestamp'],
-                    'first_seen_str': event['timestamp_str']
-                }
+    total_members = len(member_status)
+    left_members = sum(1 for m in member_status.values() if m.get('left_times'))
+    current_members = total_members - left_members
 
-        # Process exit events
-        for exit_event in all_exits:
-            user = exit_event['user']
-            if user not in member_status:
-                member_status[user] = {
-                    'first_seen': exit_event['timestamp'],
-                    'first_seen_str': exit_event['timestamp_str']
-                }
-            if 'left_times' not in member_status[user]:
-                member_status[user]['left_times'] = []
-                member_status[user]['left_times_str'] = []
-            member_status[user]['left_times'].append(exit_event['timestamp'])
-            member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
-
-        # Calculate member counts
-        total_members = len(member_status)
-        left_members = sum(1 for m in member_status.values() if m.get('left_times'))
-        current_members = total_members - left_members
-
-        return {
-            'messages_data': all_messages,
-            'user_messages': user_messages,
-            'member_status': member_status,
-            'total_members': total_members,
-            'current_members': current_members,
-            'left_members': left_members,
-            'exit_events': all_exits
-        }
-
-    except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
-        return None
+    return {
+        'messages_data': all_messages,
+        'user_messages': user_messages,
+        'member_status': member_status,
+        'total_members': total_members,
+        'current_members': current_members,
+        'left_members': left_members,
+        'exit_events': all_exits
+    }
 
 def create_member_timeline(stats):
     """Create a timeline showing join and left events with running totals."""
@@ -247,15 +253,22 @@ def create_member_timeline(stats):
     return pd.DataFrame(timeline_data)
 
 def create_exit_events_table(stats):
-    """Create an optimized table for left events."""
+    """
+    Create a separate table for exit events with two columns:
+    | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
+    This table uses the raw timestamp strings as parsed from the chat log.
+    """
     exit_events = stats.get('exit_events', [])
     if not exit_events:
         return pd.DataFrame()
     
     df = pd.DataFrame(exit_events)
-    df['Formatted Date'] = df['timestamp'].apply(lambda x: x.strftime('%d %b %Y'))
-    df = df.rename(columns={'user': 'User'})
-    return df[['User', 'Formatted Date']].rename(columns={'Formatted Date': 'Exit Date'})
+    # Rename columns using the raw timestamp string
+    df = df.rename(columns={
+        'user': 'Name of Exit Person',
+        'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
+    })
+    return df[['Name of Exit Person', 'Exit Date & Time (exactly from the txt file)']]
 
 def create_member_activity_table(stats):
     """Create an optimized table of member activity."""
@@ -364,7 +377,7 @@ def main():
                 with col:
                     st.metric(title, value)
             
-            # Member Exit Analysis
+            # Member Exit Analysis (separate exit events table)
             st.subheader("Member Exit Analysis")
             exit_df = create_exit_events_table(stats)
             if not exit_df.empty:
@@ -399,7 +412,6 @@ def main():
             if not activity_df.empty:
                 st.dataframe(activity_df)
             
-            # Message Distribution
             # Message Distribution
             st.subheader("Message Distribution")
             message_df = pd.DataFrame(list(stats['user_messages'].items()), 
