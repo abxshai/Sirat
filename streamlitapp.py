@@ -69,7 +69,12 @@ def parse_date(date_str):
         return None
 
 def process_chunk(chunk, patterns):
-    """Process a chunk of lines from the chat log."""
+    """
+    Process a chunk of lines from the chat log.
+    For each line, first check for a regular message, then a join event.
+    Next, attempt to capture exit events using a strict left pattern; 
+    if that fails, try the general left pattern.
+    """
     messages = []
     joins = []
     exits = []
@@ -79,50 +84,68 @@ def process_chunk(chunk, patterns):
         if not line:
             continue
 
-        # Try each pattern
-        for pattern_type, pattern in patterns.items():
-            match = pattern.match(line)
-            if match:
-                if pattern_type == 'message':
-                    timestamp_str, user, message = match.groups()
-                    date = parse_date(timestamp_str)
-                    if date:
-                        messages.append({
-                            'timestamp': date,
-                            'timestamp_str': timestamp_str,
-                            'user': clean_member_name(user),
-                            'message': message
-                        })
-                elif pattern_type == 'join':
-                    timestamp_str, user = match.groups()
-                    date = parse_date(timestamp_str)
-                    if date:
-                        joins.append({
-                            'timestamp': date,
-                            'timestamp_str': timestamp_str,
-                            'user': clean_member_name(user)
-                        })
-                elif pattern_type == 'left':
-                    timestamp_str, user = match.groups()
-                    date = parse_date(timestamp_str)
-                    if date:
-                        exits.append({
-                            'timestamp': date,
-                            'timestamp_str': timestamp_str,
-                            'user': clean_member_name(user)
-                        })
-                break
-    
+        # Try message pattern first
+        m = patterns['message'].match(line)
+        if m:
+            timestamp_str, user, message = m.groups()
+            date = parse_date(timestamp_str)
+            if date:
+                messages.append({
+                    'timestamp': date,
+                    'timestamp_str': timestamp_str,
+                    'user': clean_member_name(user),
+                    'message': message
+                })
+            continue
+
+        # Try join pattern
+        j = patterns['join'].match(line)
+        if j:
+            timestamp_str, user = j.groups()
+            date = parse_date(timestamp_str)
+            if date:
+                joins.append({
+                    'timestamp': date,
+                    'timestamp_str': timestamp_str,
+                    'user': clean_member_name(user)
+                })
+            continue
+
+        # Try strict left pattern first
+        sl = patterns['strict_left'].match(line)
+        if sl:
+            raw_date_str, user, left_msg = sl.groups()
+            date = parse_date(raw_date_str)
+            if date:
+                exits.append({
+                    'timestamp': date,
+                    'timestamp_str': raw_date_str,
+                    'user': clean_member_name(user)
+                })
+            continue
+
+        # Finally, try general left pattern
+        l = patterns['left'].search(line)
+        if l:
+            timestamp_str, user = l.groups()
+            date = parse_date(timestamp_str)
+            if date:
+                exits.append({
+                    'timestamp': date,
+                    'timestamp_str': timestamp_str,
+                    'user': clean_member_name(user)
+                })
+            continue
+
     return messages, joins, exits
 
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file with improved performance for large files.
-    Instead of splitting by character count, this version reads all lines,
-    then groups them into chunks (by number of lines) so that no line is split.
+    Reads the entire file as text, splits it into complete lines,
+    and groups lines into chunks so that no line is split.
     """
     try:
-        # Read the entire file as text
         content = uploaded_file.read()
         try:
             text = content.decode("utf-8")
@@ -135,7 +158,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     # Split text into complete lines
     lines = text.splitlines()
     
-    # Create chunks of complete lines
+    # Create chunks (each chunk is a set of complete lines)
     chunks = []
     for i in range(0, len(lines), lines_per_chunk):
         chunk = "\n".join(lines[i:i+lines_per_chunk])
@@ -148,6 +171,9 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         ),
         'join': re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
+        ),
+        'strict_left': re.compile(
+            r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
         ),
         'left': re.compile(
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) left'
@@ -167,12 +193,12 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             all_joins.extend(joins)
             all_exits.extend(exits)
 
-    # Sort all events by timestamp
+    # Sort events by timestamp
     all_messages.sort(key=lambda x: x['timestamp'])
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
 
-    # Calculate statistics
+    # Calculate statistics and member status
     user_messages = Counter(msg['user'] for msg in all_messages)
     member_status = {}
 
@@ -263,7 +289,6 @@ def create_exit_events_table(stats):
         return pd.DataFrame()
     
     df = pd.DataFrame(exit_events)
-    # Rename columns using the raw timestamp string
     df = df.rename(columns={
         'user': 'Name of Exit Person',
         'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
@@ -321,7 +346,6 @@ def create_wordcloud(selected_user, df):
     messages = [msg['message'] for msg in df]
     text = " ".join(messages)
     
-    # Configure word cloud
     wordcloud = WordCloud(
         width=800,
         height=400,
@@ -415,7 +439,7 @@ def main():
             # Message Distribution
             st.subheader("Message Distribution")
             message_df = pd.DataFrame(list(stats['user_messages'].items()), 
-                                    columns=['Member', 'Messages'])
+                                      columns=['Member', 'Messages'])
             message_df = message_df.sort_values('Messages', ascending=False)
             
             fig = px.bar(
