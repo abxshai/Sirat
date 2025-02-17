@@ -288,40 +288,54 @@ def create_weekly_activity_table(stats):
     join_events = stats.get('join_events', [])
     exit_events = stats.get('exit_events', [])
 
+    # If there's no message data at all, just return empty
     if not messages:
         return pd.DataFrame()
 
-    # Turn them into DataFrames
+    # Convert each set of events into DataFrame
     msg_df = pd.DataFrame(messages)
-    msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])  # dayfirst handled in parse_date
-    msg_df['week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
-
     join_df = pd.DataFrame(join_events)
-    join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
-    join_df['week'] = join_df['timestamp'].dt.to_period('W').dt.start_time
-
     exit_df = pd.DataFrame(exit_events)
-    exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
-    exit_df['week'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
 
-    # Aggregate messages by week
-    weekly_msgs = msg_df.groupby('week').size().reset_index(name='Messages Sent')
+    # --------------------
+    # Handle MESSAGES
+    # --------------------
+    if not msg_df.empty and 'timestamp' in msg_df.columns:
+        msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
+        msg_df['week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_msgs = msg_df.groupby('week').size().reset_index(name='Messages Sent')
+    else:
+        weekly_msgs = pd.DataFrame(columns=['week', 'Messages Sent'])
 
-    # For each week, gather unique joiners
-    if not join_df.empty:
-        weekly_joins = join_df.groupby('week')['user'].apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Joined')
+    # --------------------
+    # Handle JOINS
+    # --------------------
+    if not join_df.empty and 'timestamp' in join_df.columns:
+        join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
+        join_df['week'] = join_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_joins = join_df.groupby('week')['user'] \
+            .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Joined')
     else:
         weekly_joins = pd.DataFrame(columns=['week', 'Joined'])
 
-    # For each week, gather unique leavers
-    if not exit_df.empty:
-        weekly_exits = exit_df.groupby('week')['user'].apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Left')
+    # --------------------
+    # Handle EXITS
+    # --------------------
+    if not exit_df.empty and 'timestamp' in exit_df.columns:
+        exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
+        exit_df['week'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_exits = exit_df.groupby('week')['user'] \
+            .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Left')
     else:
         weekly_exits = pd.DataFrame(columns=['week', 'Left'])
 
-    # Merge all
+    # --------------------
+    # Merge all weekly data
+    # --------------------
     weekly_data = pd.merge(weekly_msgs, weekly_joins, on='week', how='outer')
     weekly_data = pd.merge(weekly_data, weekly_exits, on='week', how='outer')
+
+    # Fill empty cells with blank
     weekly_data = weekly_data.fillna('')
     weekly_data = weekly_data.sort_values('week')
 
