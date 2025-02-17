@@ -62,7 +62,7 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_date(date_str):
-    """Parse date string with error handling."""
+    """Parse date string with error handling using dayfirst=True."""
     try:
         return date_parser.parse(date_str, fuzzy=False, dayfirst=True)
     except Exception:
@@ -92,7 +92,6 @@ def process_chunk(chunk, patterns):
             timestamp_str, user, message = m.groups()
             date = parse_date(timestamp_str)
             if date:
-                # Clean message: remove invisible characters (like \u200e) and extra whitespace.
                 msg_clean = message.strip().replace("\u200e", "").strip()
                 # If the message exactly equals the sender's name + " left" (case insensitive), treat as exit.
                 if msg_clean.lower() == clean_member_name(user).lower() + " left":
@@ -166,7 +165,6 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         st.error(f"Error reading file: {str(e)}")
         return None
 
-    # Split text into complete lines.
     lines = text.splitlines()
     chunks = []
     for i in range(0, len(lines), lines_per_chunk):
@@ -185,12 +183,10 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
         ),
         'left': re.compile(
-            # Refined pattern: require "left" to be a standalone word at the end of the line.
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?)\s*\bleft\b\s*$'
         )
     }
     
-    # Process chunks in parallel.
     all_messages = []
     all_joins = []
     all_exits = []
@@ -202,7 +198,6 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             all_joins.extend(joins)
             all_exits.extend(exits)
 
-    # Sort events by timestamp.
     all_messages.sort(key=lambda x: x['timestamp'])
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
@@ -281,7 +276,7 @@ def create_member_timeline(stats):
 
 def create_exit_events_table(stats):
     """
-    Create a separate table for exit events with two columns:
+    Create a table for exit events with two columns:
     | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
     """
     exit_events = stats.get('exit_events', [])
@@ -314,27 +309,61 @@ def create_member_activity_table(stats):
         df = df.sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
     return df
 
-def create_weekly_breakdown(stats):
-    """Create an optimized weekly breakdown of messages and member status."""
-    if not stats['messages_data']:
-        return pd.DataFrame()
-    df = pd.DataFrame(stats['messages_data'])
-    user_msgs = df.groupby('user').size().reset_index(name='Messages Sent')
-    weekly_data = []
-    for _, row in user_msgs.iterrows():
-        user = row['user']
-        status = stats['member_status'].get(user, {})
-        weekly_data.append({
-            'Member Name': user,
-            'Messages Sent': row['Messages Sent'],
-            'Current Status': 'Left' if status.get('left_times') else 'Present'
-        })
-    return pd.DataFrame(weekly_data)
+def create_weekly_activity_table(stats):
+    """
+    Create a weekly breakdown of overall activity:
+      - Total messages sent per week.
+      - List of members who joined that week.
+      - List of members who left that week.
+    This table spans all weeks based on the timestamps in the txt file.
+    """
+    messages = stats.get('messages_data', [])
+    join_events = stats.get('join_events', [])
+    exit_events = stats.get('exit_events', [])
 
-def create_wordcloud(selected_user, df):
-    """Generate an optimized word cloud image."""
-    if selected_user != "Overall":
-        df = df[df['user'] == selected_user]
+    if not messages:
+        return pd.DataFrame()
+
+    msg_df = pd.DataFrame(messages)
+    join_df = pd.DataFrame(join_events)
+    exit_df = pd.DataFrame(exit_events)
+
+    # Process messages by week
+    if not msg_df.empty and 'timestamp' in msg_df.columns:
+        msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
+        msg_df['week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_msgs = msg_df.groupby('week').size().reset_index(name='Messages Sent')
+    else:
+        weekly_msgs = pd.DataFrame(columns=['week', 'Messages Sent'])
+
+    # Process joins by week
+    if not join_df.empty and 'timestamp' in join_df.columns:
+        join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
+        join_df['week'] = join_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_joins = join_df.groupby('week')['user'] \
+            .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Joined')
+    else:
+        weekly_joins = pd.DataFrame(columns=['week', 'Joined'])
+
+    # Process exits by week
+    if not exit_df.empty and 'timestamp' in exit_df.columns:
+        exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
+        exit_df['week'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_exits = exit_df.groupby('week')['user'] \
+            .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Left')
+    else:
+        weekly_exits = pd.DataFrame(columns=['week', 'Left'])
+
+    # Merge all weekly data
+    weekly_data = pd.merge(weekly_msgs, weekly_joins, on='week', how='outer')
+    weekly_data = pd.merge(weekly_data, weekly_exits, on='week', how='outer')
+    weekly_data = weekly_data.fillna('')
+    weekly_data = weekly_data.sort_values('week')
+
+    return weekly_data
+
+def create_wordcloud(df):
+    """Generate an optimized word cloud image from overall messages."""
     messages = [msg['message'] for msg in df]
     text = " ".join(messages)
     wordcloud = WordCloud(
@@ -360,12 +389,9 @@ def main():
         if df.empty:
             st.error("No messages found.")
             return
-        user_list = list(stats['user_messages'].keys())
-        if "group_notification" in user_list:
-            user_list.remove("group_notification")
-        user_list.sort()
-        user_list.insert(0, "Overall")
-        selected_user = st.sidebar.selectbox("Show Analysis with respect to", user_list)
+        
+        # Remove the "Show Analysis with respect to" component.
+        # Now, analysis is done overall.
         if st.sidebar.button("Show Analysis"):
             st.title("Chat Analysis Results")
             total_messages = len(stats['messages_data'])
@@ -412,12 +438,12 @@ def main():
             if not activity_df.empty:
                 st.dataframe(activity_df)
             st.subheader("Weekly Message & Member Analysis")
-            weekly_df = create_weekly_breakdown(stats)
+            weekly_df = create_weekly_activity_table(stats)
             if not weekly_df.empty:
                 st.dataframe(weekly_df)
-            st.subheader(f"Word Cloud for {'Overall' if selected_user == 'Overall' else selected_user}")
+            st.subheader("Word Cloud (Overall)")
             try:
-                wc = create_wordcloud(selected_user, stats['messages_data'])
+                wc = create_wordcloud(stats['messages_data'])
                 fig, ax = plt.subplots(figsize=(10, 5))
                 ax.imshow(wc, interpolation="bilinear")
                 ax.axis("off")
@@ -438,14 +464,13 @@ def main():
                         f"- Top 5 contributors: {top_contributors}\n"
                         f"- Media messages shared: {media_messages}\n"
                         f"- Links shared: {links_shared}\n\n"
-                        "Provide insights about group dynamics, engagement patterns, "
-                        "and member participation."
+                        "Provide insights about group dynamics, engagement patterns, and member participation."
                     )
                     placeholder = st.empty()
                     get_llm_reply(client, prompt, placeholder)
                 except Exception as e:
                     st.error(f"Error generating LLM analysis: {str(e)}")
-                    
+
 if __name__ == "__main__":
     st.set_page_config(
         page_title="WhatsApp Chat Analyzer",
