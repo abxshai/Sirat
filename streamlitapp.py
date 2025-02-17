@@ -183,6 +183,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
         ),
         'left': re.compile(
+            # Refined pattern: require "left" as a standalone word at the end.
             r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?)\s*\bleft\b\s*$'
         )
     }
@@ -225,8 +226,24 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         member_status[user]['left_times'].append(exit_event['timestamp'])
         member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
 
+    # Compute permanent left count as those who did not rejoin after their exit.
+    # For each user, if there exists a join event after their exit, ignore the exit.
+    last_join_ts = {}
+    for j in all_joins:
+        usr = j['user']
+        tstamp = j['timestamp']
+        if usr not in last_join_ts or tstamp > last_join_ts[usr]:
+            last_join_ts[usr] = tstamp
+
+    permanent_exits = []
+    for e in all_exits:
+        usr = e['user']
+        exit_time = e['timestamp']
+        if usr in last_join_ts and last_join_ts[usr] > exit_time:
+            continue
+        permanent_exits.append(e)
+    left_members = len({e['user'] for e in permanent_exits})
     total_members = len(member_status)
-    left_members = sum(1 for m in member_status.values() if m.get('left_times'))
     current_members = total_members - left_members
 
     return {
@@ -237,7 +254,8 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         'current_members': current_members,
         'left_members': left_members,
         'exit_events': all_exits,
-        'join_events': all_joins
+        'join_events': all_joins,
+        'permanent_exits': permanent_exits  # for use in exit table
     }
 
 def create_member_timeline(stats):
@@ -276,17 +294,19 @@ def create_member_timeline(stats):
 
 def create_exit_events_table(stats):
     """
-    Create a table for exit events with two columns:
+    Create a table for exit events (permanent exits only) with two columns:
     | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
     """
-    exit_events = stats.get('exit_events', [])
-    if not exit_events:
+    permanent_exits = stats.get('permanent_exits', [])
+    if not permanent_exits:
         return pd.DataFrame()
-    df = pd.DataFrame(exit_events)
+    df = pd.DataFrame(permanent_exits)
     df = df.rename(columns={
         'user': 'Name of Exit Person',
         'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
     })
+    # Drop duplicates so each person appears once
+    df = df.drop_duplicates(subset=['Name of Exit Person'])
     return df[['Name of Exit Person', 'Exit Date & Time (exactly from the txt file)']]
 
 def create_member_activity_table(stats):
@@ -312,10 +332,11 @@ def create_member_activity_table(stats):
 def create_weekly_activity_table(stats):
     """
     Create a weekly breakdown of overall activity:
-      - Total messages sent per week.
-      - List of members who joined that week.
-      - List of members who left that week.
-    This table spans all weeks based on the timestamps in the txt file.
+      - Week Starting (date)
+      - Total Messages Sent in that week.
+      - Names of members who joined that week.
+      - Names of members who left that week.
+    The table spans all weeks based on the timestamps in the txt file.
     """
     messages = stats.get('messages_data', [])
     join_events = stats.get('join_events', [])
@@ -331,35 +352,36 @@ def create_weekly_activity_table(stats):
     # Process messages by week
     if not msg_df.empty and 'timestamp' in msg_df.columns:
         msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-        msg_df['week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
-        weekly_msgs = msg_df.groupby('week').size().reset_index(name='Messages Sent')
+        msg_df['Week Starting'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_msgs = msg_df.groupby('Week Starting').size().reset_index(name='Messages Sent')
     else:
-        weekly_msgs = pd.DataFrame(columns=['week', 'Messages Sent'])
+        weekly_msgs = pd.DataFrame(columns=['Week Starting', 'Messages Sent'])
 
     # Process joins by week
     if not join_df.empty and 'timestamp' in join_df.columns:
         join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
-        join_df['week'] = join_df['timestamp'].dt.to_period('W').dt.start_time
-        weekly_joins = join_df.groupby('week')['user'] \
+        join_df['Week Starting'] = join_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_joins = join_df.groupby('Week Starting')['user'] \
             .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Joined')
     else:
-        weekly_joins = pd.DataFrame(columns=['week', 'Joined'])
+        weekly_joins = pd.DataFrame(columns=['Week Starting', 'Joined'])
 
     # Process exits by week
     if not exit_df.empty and 'timestamp' in exit_df.columns:
         exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
-        exit_df['week'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
-        weekly_exits = exit_df.groupby('week')['user'] \
+        exit_df['Week Starting'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_exits = exit_df.groupby('Week Starting')['user'] \
             .apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Left')
     else:
-        weekly_exits = pd.DataFrame(columns=['week', 'Left'])
+        weekly_exits = pd.DataFrame(columns=['Week Starting', 'Left'])
 
-    # Merge all weekly data
-    weekly_data = pd.merge(weekly_msgs, weekly_joins, on='week', how='outer')
-    weekly_data = pd.merge(weekly_data, weekly_exits, on='week', how='outer')
+    # Merge all weekly data on 'Week Starting'
+    weekly_data = pd.merge(weekly_msgs, weekly_joins, on='Week Starting', how='outer')
+    weekly_data = pd.merge(weekly_data, weekly_exits, on='Week Starting', how='outer')
     weekly_data = weekly_data.fillna('')
-    weekly_data = weekly_data.sort_values('week')
-
+    weekly_data = weekly_data.sort_values('Week Starting')
+    # Format Week Starting as a string for clarity.
+    weekly_data['Week Starting'] = weekly_data['Week Starting'].dt.strftime('%d %b %Y')
     return weekly_data
 
 def create_wordcloud(df):
@@ -390,8 +412,7 @@ def main():
             st.error("No messages found.")
             return
         
-        # Remove the "Show Analysis with respect to" component.
-        # Now, analysis is done overall.
+        # Removed the "with respect to" selection; analysis is overall.
         if st.sidebar.button("Show Analysis"):
             st.title("Chat Analysis Results")
             total_messages = len(stats['messages_data'])
@@ -412,7 +433,7 @@ def main():
             exit_df = create_exit_events_table(stats)
             if not exit_df.empty:
                 st.dataframe(exit_df)
-                st.metric("Total Members Left", stats['left_members'])
+                st.metric("Total Members Left", len(exit_df))
             else:
                 st.write("No exit events recorded")
             st.subheader("Member Timeline")
