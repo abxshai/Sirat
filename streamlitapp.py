@@ -319,7 +319,8 @@ def create_weekly_activity_table(stats):
         return pd.DataFrame()
     min_time = min(msg['timestamp'] for msg in messages)
     max_time = max(msg['timestamp'] for msg in messages)
-    total_weeks = math.ceil((max_time - min_time).total_seconds() / (7 * 86400))
+    # Ensure the final (partial) week is included.
+    total_weeks = math.floor((max_time - min_time).total_seconds() / (7 * 86400)) + 1
     
     # Precompute max message timestamp per user.
     user_max = {}
@@ -492,8 +493,7 @@ def main():
                     f"- Top 5 contributors: {top_contributors}\n"
                     f"- Media messages shared: {media_messages}\n"
                     f"- Links shared: {links_shared}\n\n"
-                    "Provide insights about group dynamics, engagement patterns, "
-                    "and member participation."
+                    "Provide insights about group dynamics, engagement patterns, and member participation."
                 )
                 placeholder = st.empty()
                 get_llm_reply(client, prompt, placeholder)
