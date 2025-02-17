@@ -61,7 +61,7 @@ def get_llm_reply(client, prompt, word_placeholder):
 def parse_date(date_str):
     """
     Parse a WhatsApp-style date string.
-    Uses dayfirst=True; if parsing results in a year below 1900, assumes it belongs to the 2000s.
+    Uses dayfirst=True; if the parsed year is below 1900, assumes it belongs to the 2000s.
     """
     try:
         dt = date_parser.parse(date_str, fuzzy=False, dayfirst=True)
@@ -151,7 +151,7 @@ def process_chunk(chunk, patterns):
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file.
-    Splits the file into chunks, applies regex patterns,
+    Reads the file, splits into chunks, applies regex patterns,
     and returns messages, join events, exit events, and unified member_status.
     """
     try:
@@ -195,7 +195,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
     
-    # Unified member_status: for each member, use the earliest event (join or message) as join date.
+    # Unified member_status: For each member, use the earliest event (join or message) as the join date.
     unified_member_status = {}
     for event in sorted(all_messages + all_joins, key=lambda x: x['timestamp']):
         user = event['user']
@@ -316,50 +316,47 @@ def create_member_activity_table(stats):
         df = df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
     return df
 
-def create_monthly_engagement_table(stats):
+def create_quarterly_engagement_table(stats):
     """
-    Create a Monthly Engagement Analysis table with columns:
-      Month, Month Duration, Member Name, Number of Messages Sent, Follower Count.
-    The grouping is done directly from the txt file timestamps.
-    Month numbering starts from 1.
-    Follower Count is the number of active members at the end of that month.
+    Create a Quarterly Engagement Analysis table with columns:
+      Quarter, Quarter Duration, Member Name, Number of Messages Sent, Follower Count.
+    Group the messages by quarter using the exact timestamps from the txt file.
+    Quarter numbering starts from 1.
+    Follower Count is computed as the number of active members at the end of that quarter.
     """
     msg_df = pd.DataFrame(stats['messages_data'])
     if msg_df.empty:
         return pd.DataFrame()
     msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-    # Group by month using period 'M'
-    msg_df['Month Start'] = msg_df['timestamp'].dt.to_period('M').dt.start_time
-    # Group by Month and Member to count messages
-    monthly_group = msg_df.groupby(['Month Start', 'user']).size().reset_index(name='Number of Messages Sent')
-    monthly_group = monthly_group.rename(columns={'user': 'Member Name'})
-    # Month Duration: from Month Start to Month End
-    monthly_group['Month Duration'] = monthly_group['Month Start'].apply(
-        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.offsets.MonthEnd(0)).strftime('%d %b %Y')}"
+    # Group by quarter using period 'Q'
+    msg_df['Quarter Start'] = msg_df['timestamp'].dt.to_period('Q').dt.start_time
+    # Group by Quarter Start and Member to count messages.
+    quarterly_group = msg_df.groupby(['Quarter Start', 'user']).size().reset_index(name='Number of Messages Sent')
+    quarterly_group = quarterly_group.rename(columns={'user': 'Member Name'})
+    # Quarter Duration: from Quarter Start to Quarter End.
+    quarterly_group['Quarter Duration'] = quarterly_group['Quarter Start'].apply(
+        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.offsets.QuarterEnd(0)).strftime('%d %b %Y')}"
     )
-    # Create Month label starting from 1
-    unique_months = sorted(monthly_group['Month Start'].unique())
-    month_labels = {month: f"Month {i+1}" for i, month in enumerate(unique_months)}
-    monthly_group['Month'] = monthly_group['Month Start'].map(month_labels)
+    unique_quarters = sorted(quarterly_group['Quarter Start'].unique())
+    quarter_labels = {q: f"Quarter {i+1}" for i, q in enumerate(unique_quarters)}
+    quarterly_group['Quarter'] = quarterly_group['Quarter Start'].map(quarter_labels)
     
-    # Compute Follower Count at the end of each month.
+    # Compute Follower Count at the end of each quarter.
     follower_count_dict = {}
-    for month_start in unique_months:
-        month_end = month_start + pd.offsets.MonthEnd(0)
+    for q_start in unique_quarters:
+        q_end = q_start + pd.offsets.QuarterEnd(0)
         count = 0
         for member, info in stats['member_status'].items():
             join_date = info['first_seen']
-            # A member is active at month_end if they joined on or before month_end
-            # and either they never left or their last exit is after month_end.
-            if join_date <= month_end:
+            if join_date <= q_end:
                 left_times = info.get('left_times', [])
-                if not left_times or max(left_times) > month_end:
+                if not left_times or max(left_times) > q_end:
                     count += 1
-        follower_count_dict[month_start] = count
-    monthly_group['Follower Count'] = monthly_group['Month Start'].map(follower_count_dict)
+        follower_count_dict[q_start] = count
+    quarterly_group['Follower Count'] = quarterly_group['Quarter Start'].map(follower_count_dict)
     
-    final_df = monthly_group[['Month', 'Month Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
-    final_df = final_df.sort_values(['Month', 'Member Name'])
+    final_df = quarterly_group[['Quarter', 'Quarter Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
+    final_df = final_df.sort_values(['Quarter', 'Member Name'])
     return final_df
 
 def create_wordcloud(df):
@@ -452,8 +449,8 @@ def main():
             if not activity_df.empty:
                 st.dataframe(activity_df)
             
-            st.subheader("Monthly Engagement Analysis")
-            engagement_df = create_monthly_engagement_table(stats)
+            st.subheader("Quarterly Engagement Analysis")
+            engagement_df = create_quarterly_engagement_table(stats)
             if not engagement_df.empty:
                 st.dataframe(engagement_df)
             
