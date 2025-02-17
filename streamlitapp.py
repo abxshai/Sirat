@@ -61,8 +61,7 @@ def get_llm_reply(client, prompt, word_placeholder):
 def parse_date(date_str):
     """
     Parse a WhatsApp-style date string.
-    Use dayfirst=True. If the parsed year is below 1900 (i.e. a two-digit year misinterpreted),
-    add 2000 to force it into the 2000s.
+    Uses dayfirst=True; if parsing results in a year below 1900, assumes it belongs to the 2000s.
     """
     try:
         dt = date_parser.parse(date_str, fuzzy=False, dayfirst=True)
@@ -152,7 +151,7 @@ def process_chunk(chunk, patterns):
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file.
-    Reads the file, splits into chunks, applies regex patterns,
+    Splits the file into chunks, applies regex patterns,
     and returns messages, join events, exit events, and unified member_status.
     """
     try:
@@ -218,7 +217,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         unified_member_status[user]['left_times'].append(exit_event['timestamp'])
         unified_member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Build membership timeline using unified join dates and exit events.
+    # Build the membership timeline using unified join dates and exit events.
     timeline = create_membership_timeline({
         'member_status': unified_member_status,
         'exit_events': all_exits
@@ -246,8 +245,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
 def create_membership_timeline(stats):
     """
     Create a timeline DataFrame using unified join dates and exit events.
-    For each member, add a join event at their unified join date and,
-    if available, their last exit event.
+    For each member, add a join event at their unified join date and, if available, their last exit event.
     Then compute the cumulative active member count over time.
     """
     timeline_events = []
@@ -318,45 +316,50 @@ def create_member_activity_table(stats):
         df = df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
     return df
 
-def create_engagement_table(stats):
+def create_monthly_engagement_table(stats):
     """
-    Create a table with columns:
-      Week, Week Duration, Member Name, Number of Messages Sent, Follower Count.
-    The week grouping is done directly from the txt file timestamps.
-    Week numbering starts from 1.
-    Follower Count is computed as the number of active members at the end of that week.
+    Create a Monthly Engagement Analysis table with columns:
+      Month, Month Duration, Member Name, Number of Messages Sent, Follower Count.
+    The grouping is done directly from the txt file timestamps.
+    Month numbering starts from 1.
+    Follower Count is the number of active members at the end of that month.
     """
     msg_df = pd.DataFrame(stats['messages_data'])
     if msg_df.empty:
         return pd.DataFrame()
     msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-    msg_df['Week Starting'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
-    # Group by Week Starting and Member
-    weekly_group = msg_df.groupby(['Week Starting', 'user']).size().reset_index(name='Number of Messages Sent')
-    weekly_group = weekly_group.rename(columns={'user': 'Member Name'})
-    weekly_group['Week Duration'] = weekly_group['Week Starting'].apply(
-        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.Timedelta(days=6)).strftime('%d %b %Y')}"
+    # Group by month using period 'M'
+    msg_df['Month Start'] = msg_df['timestamp'].dt.to_period('M').dt.start_time
+    # Group by Month and Member to count messages
+    monthly_group = msg_df.groupby(['Month Start', 'user']).size().reset_index(name='Number of Messages Sent')
+    monthly_group = monthly_group.rename(columns={'user': 'Member Name'})
+    # Month Duration: from Month Start to Month End
+    monthly_group['Month Duration'] = monthly_group['Month Start'].apply(
+        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.offsets.MonthEnd(0)).strftime('%d %b %Y')}"
     )
-    unique_weeks = sorted(weekly_group['Week Starting'].unique())
-    week_labels = {week: f"Week {i+1}" for i, week in enumerate(unique_weeks)}
-    weekly_group['Week'] = weekly_group['Week Starting'].map(week_labels)
+    # Create Month label starting from 1
+    unique_months = sorted(monthly_group['Month Start'].unique())
+    month_labels = {month: f"Month {i+1}" for i, month in enumerate(unique_months)}
+    monthly_group['Month'] = monthly_group['Month Start'].map(month_labels)
     
-    # Compute Follower Count at week end.
+    # Compute Follower Count at the end of each month.
     follower_count_dict = {}
-    for week_start in unique_weeks:
-        week_end = week_start + pd.Timedelta(days=6)
+    for month_start in unique_months:
+        month_end = month_start + pd.offsets.MonthEnd(0)
         count = 0
         for member, info in stats['member_status'].items():
             join_date = info['first_seen']
-            if join_date <= week_end:
+            # A member is active at month_end if they joined on or before month_end
+            # and either they never left or their last exit is after month_end.
+            if join_date <= month_end:
                 left_times = info.get('left_times', [])
-                if not left_times or max(left_times) > week_end:
+                if not left_times or max(left_times) > month_end:
                     count += 1
-        follower_count_dict[week_start] = count
-    weekly_group['Follower Count'] = weekly_group['Week Starting'].map(follower_count_dict)
+        follower_count_dict[month_start] = count
+    monthly_group['Follower Count'] = monthly_group['Month Start'].map(follower_count_dict)
     
-    final_df = weekly_group[['Week', 'Week Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
-    final_df = final_df.sort_values(['Week', 'Member Name'])
+    final_df = monthly_group[['Month', 'Month Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
+    final_df = final_df.sort_values(['Month', 'Member Name'])
     return final_df
 
 def create_wordcloud(df):
@@ -449,8 +452,8 @@ def main():
             if not activity_df.empty:
                 st.dataframe(activity_df)
             
-            st.subheader("Weekly Engagement Analysis")
-            engagement_df = create_engagement_table(stats)
+            st.subheader("Monthly Engagement Analysis")
+            engagement_df = create_monthly_engagement_table(stats)
             if not engagement_df.empty:
                 st.dataframe(engagement_df)
             
