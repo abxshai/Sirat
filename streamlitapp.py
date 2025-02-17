@@ -71,11 +71,7 @@ def parse_date(date_str):
 def process_chunk(chunk, patterns):
     """
     Process a chunk of lines from the chat log.
-    First try matching the general message pattern.
-    If a match is found, check whether the message text (after cleaning)
-    exactly equals the sender’s name followed by " left". If so, record as an exit event.
-    Otherwise, record as a regular message.
-    Then process join events and any remaining left events.
+    Try matching the message, join, and left patterns.
     """
     messages = []
     joins = []
@@ -86,13 +82,14 @@ def process_chunk(chunk, patterns):
         if not line:
             continue
 
-        # Try message pattern first.
+        # Try message pattern.
         m = patterns['message'].match(line)
         if m:
             timestamp_str, user, message = m.groups()
             date = parse_date(timestamp_str)
             if date:
                 msg_clean = message.strip().replace("\u200e", "").strip()
+                # If the message equals "User left", treat it as an exit.
                 if msg_clean.lower() == clean_member_name(user).lower() + " left":
                     exits.append({
                         'timestamp': date,
@@ -134,7 +131,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Finally, try general left pattern.
+        # Try general left pattern.
         l = patterns['left'].search(line)
         if l:
             timestamp_str, user = l.groups()
@@ -152,8 +149,7 @@ def process_chunk(chunk, patterns):
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file.
-    Reads the file, splits into chunks, applies regex patterns,
-    and returns messages, join events, exit events, and member status.
+    Returns messages, join events, exit events, and member_status.
     """
     try:
         content = uploaded_file.read()
@@ -201,37 +197,45 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
 
-    # Combine join events and messages so each member's "first_seen" is the earliest event.
-    combined_events = sorted(all_joins + all_messages, key=lambda x: x['timestamp'])
+    # For each member, set the join date as the earliest explicit join event if available;
+    # otherwise, use the earliest message event.
     member_status = {}
-    for event in combined_events:
+    for event in all_joins:
         user = event['user']
         if user not in member_status:
-            member_status[user] = {
-                'first_seen': event['timestamp'],
-                'first_seen_str': event['timestamp_str']  # use exact timestamp from file
-            }
+            member_status[user] = {'first_seen': event['timestamp'], 'first_seen_str': event['timestamp_str']}
+        else:
+            if event['timestamp'] < member_status[user]['first_seen']:
+                member_status[user]['first_seen'] = event['timestamp']
+                member_status[user]['first_seen_str'] = event['timestamp_str']
+    for event in all_messages:
+        user = event['user']
+        if user not in member_status:
+            member_status[user] = {'first_seen': event['timestamp'], 'first_seen_str': event['timestamp_str']}
+        else:
+            if event['timestamp'] < member_status[user]['first_seen']:
+                member_status[user]['first_seen'] = event['timestamp']
+                member_status[user]['first_seen_str'] = event['timestamp_str']
+    
+    # Append exit events to member_status.
     for exit_event in all_exits:
         user = exit_event['user']
         if user not in member_status:
-            member_status[user] = {
-                'first_seen': exit_event['timestamp'],
-                'first_seen_str': exit_event['timestamp_str']
-            }
+            member_status[user] = {'first_seen': exit_event['timestamp'], 'first_seen_str': exit_event['timestamp_str']}
         if 'left_times' not in member_status[user]:
             member_status[user]['left_times'] = []
             member_status[user]['left_times_str'] = []
         member_status[user]['left_times'].append(exit_event['timestamp'])
         member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Compute permanent exit info using the timeline:
-    timeline = create_member_timeline({
-        'member_status': member_status,
+    # Create a membership timeline using explicit join and exit events.
+    timeline = create_membership_timeline({
         'join_events': all_joins,
-        'messages_data': all_messages,
-        'exit_events': all_exits
+        'exit_events': all_exits,
+        'member_status': member_status
     })
     if not timeline.empty:
+        # For consistency, get the last event per member.
         last_events = timeline.sort_values('Date').groupby('Member', as_index=False).last()
         permanent_left_users = set(last_events[last_events['Event Type'] == 'left']['Member'])
     else:
@@ -251,51 +255,67 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         'join_events': all_joins
     }
 
-def create_member_timeline(stats):
+def create_membership_timeline(stats):
     """
-    Create a timeline DataFrame of join and left events.
-    Adds a 'Member' column to indicate the user.
+    Create a timeline DataFrame using explicit join and exit events.
+    For members with no explicit join event, use the first_seen from member_status.
     """
-    events = []
+    timeline_events = []
+    # Use explicit join events.
+    for event in stats['join_events']:
+        timeline_events.append({
+            'timestamp': event['timestamp'],
+            'timestamp_str': event['timestamp_str'],
+            'user': event['user'],
+            'event_type': 'join',
+            'change': 1
+        })
+    # Use explicit exit events.
+    for event in stats['exit_events']:
+        timeline_events.append({
+            'timestamp': event['timestamp'],
+            'timestamp_str': event['timestamp_str'],
+            'user': event['user'],
+            'event_type': 'left',
+            'change': -1
+        })
+    # For any member without an explicit join event, add one using member_status.
+    explicit_joins = {e['user'] for e in stats['join_events']}
     for member, status in stats['member_status'].items():
-        if status.get('first_seen'):
-            events.append({
-                'Date': status['first_seen'],
-                'change': 1,
-                'Event Type': 'join',
-                'Member': member
+        if member not in explicit_joins:
+            timeline_events.append({
+                'timestamp': status['first_seen'],
+                'timestamp_str': status['first_seen_str'],
+                'user': member,
+                'event_type': 'join',
+                'change': 1
             })
-        if 'left_times' in status:
-            for lt in status['left_times']:
-                events.append({
-                    'Date': lt,
-                    'change': -1,
-                    'Event Type': 'left',
-                    'Member': member
-                })
-    if not events:
-        return pd.DataFrame()
-    events.sort(key=lambda x: x['Date'])
+    timeline_events.sort(key=lambda x: x['timestamp'])
+    cum_count = 0
     timeline_data = []
-    member_count = 0
-    for event in events:
-        member_count += event['change']
+    for event in timeline_events:
+        cum_count += event['change']
         timeline_data.append({
-            'Date': event['Date'],
-            'Member Count': member_count,
-            'Event': f"{event['Member']} {event['Event Type']}",
-            'Event Type': event['Event Type'],
-            'Member': event['Member']
+            'Date': event['timestamp'],
+            'Member Count': cum_count,
+            'Event': f"{event['user']} {event['event_type']}",
+            'Event Type': event['event_type'],
+            'Member': event['user']
         })
     return pd.DataFrame(timeline_data)
+
+def create_member_timeline(stats):
+    """
+    Legacy function (not used for line chart anymore).
+    """
+    return create_membership_timeline(stats)
 
 def create_exit_events_table(stats):
     """
     Create a table for permanent exit events with two columns:
-    | Name of Exit Person | Exit Date & Time (from the txt file) |
-    Only members whose last event is 'left' are included.
+    Only include members whose last event is 'left'.
     """
-    timeline_df = create_member_timeline(stats)
+    timeline_df = create_membership_timeline(stats)
     if timeline_df.empty:
         return pd.DataFrame()
     last_events = timeline_df.sort_values('Date').groupby('Member', as_index=False).last()
@@ -309,7 +329,6 @@ def create_member_activity_table(stats):
     exit_table = create_exit_events_table(stats)
     permanent_left = exit_table['Name of Exit Person'].tolist() if not exit_table.empty else []
     for member, status in stats['member_status'].items():
-        # Use the exact timestamp strings from the file.
         join_date = status['first_seen_str']
         last_exit = status['left_times_str'][-1] if status.get('left_times_str') else 'Present'
         current_status = 'Left' if member in permanent_left else 'Active'
@@ -383,7 +402,7 @@ def main():
                 st.write("No exit events recorded")
             
             st.subheader("Member Timeline")
-            timeline_df = create_member_timeline(stats)
+            timeline_df = create_membership_timeline(stats)
             if not timeline_df.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
