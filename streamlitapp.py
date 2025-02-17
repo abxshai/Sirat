@@ -9,7 +9,7 @@ from dateutil import parser as date_parser
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import concurrent.futures
 
@@ -60,8 +60,8 @@ def get_llm_reply(client, prompt, word_placeholder):
 
 def parse_date(date_str):
     """
-    Parse a WhatsApp-style date string.
-    Uses dayfirst=True; if the parsed year is below 1900, assumes it belongs to the 2000s.
+    Parse a WhatsApp-style date string using dayfirst=True.
+    If the parsed year is below 1900, adjust it to the 2000s.
     """
     try:
         dt = date_parser.parse(date_str, fuzzy=False, dayfirst=True)
@@ -85,7 +85,6 @@ def process_chunk(chunk, patterns):
         if not line:
             continue
 
-        # Try message pattern.
         m = patterns['message'].match(line)
         if m:
             timestamp_str, user, message = m.groups()
@@ -107,7 +106,6 @@ def process_chunk(chunk, patterns):
                     })
             continue
 
-        # Try join pattern.
         j = patterns['join'].match(line)
         if j:
             timestamp_str, user = j.groups()
@@ -120,7 +118,6 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Try strict left pattern.
         sl = patterns['strict_left'].match(line)
         if sl:
             raw_date_str, user, left_msg = sl.groups()
@@ -133,7 +130,6 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Try general left pattern.
         l = patterns['left'].search(line)
         if l:
             timestamp_str, user = l.groups()
@@ -316,58 +312,53 @@ def create_member_activity_table(stats):
         df = df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
     return df
 
-def create_quarterly_engagement_table(stats):
+def create_weekly_engagement_table(stats):
     """
-    Create a Quarterly Engagement Analysis table with columns:
-      Quarter, Quarter Duration, Member Name, Number of Messages Sent, Follower Count.
-    Group messages by quarter using the exact timestamps from the txt file.
-    Quarter numbering starts at 1 and is sequential, and all quarters between the earliest and latest date are included.
-    Follower Count is the number of active members at the end of that quarter.
+    Create a Weekly Engagement Analysis table with columns:
+      Week, Week Duration, Member Name, Number of Messages Sent, Follower Count.
+    The week is determined sequentially from the global earliest message date.
+    Each message's week number is calculated as:
+         week_index = floor((msg_date - global_start).days / 7) + 1.
+    Week Duration is computed from global_start.
+    Follower Count is the number of active members at the end of that week.
     """
     msg_df = pd.DataFrame(stats['messages_data'])
     if msg_df.empty:
         return pd.DataFrame()
     msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-    # Determine the continuous quarter range.
-    start_quarter = msg_df['timestamp'].min().to_period('Q').to_timestamp()
-    end_quarter = msg_df['timestamp'].max().to_period('Q').to_timestamp()
-    all_quarters = pd.date_range(start=start_quarter, end=end_quarter, freq='QS')
+    global_start = msg_df['timestamp'].min()
+    # Compute week number relative to global_start.
+    msg_df['Week'] = ((msg_df['timestamp'] - global_start).dt.days // 7) + 1
+    # Compute Week Starting and Week Ending dates.
+    msg_df['Week Starting'] = msg_df['Week'].apply(lambda w: global_start + timedelta(days=7*(w-1)))
+    msg_df['Week Ending'] = msg_df['Week'].apply(lambda w: global_start + timedelta(days=7*(w-1) + 6))
+    # Group by Week and Member.
+    weekly_group = msg_df.groupby(['Week', 'Week Starting', 'Week Ending', 'user']).size().reset_index(name='Number of Messages Sent')
+    weekly_group = weekly_group.rename(columns={'user': 'Member Name'})
     
-    # Group messages by quarter (using quarter start) and member.
-    msg_df['Quarter Start'] = msg_df['timestamp'].dt.to_period('Q').dt.to_timestamp()
-    grouped = msg_df.groupby(['Quarter Start', 'user']).size().reset_index(name='Number of Messages Sent')
-    grouped = grouped.rename(columns={'user': 'Member Name'})
-    
-    # Create a DataFrame with all combinations of quarters and members.
-    all_members = grouped['Member Name'].unique()
-    full_index = pd.MultiIndex.from_product([all_quarters, all_members], names=['Quarter Start', 'Member Name'])
-    full_df = grouped.set_index(['Quarter Start', 'Member Name']).reindex(full_index, fill_value=0).reset_index()
-    
-    # Quarter Duration: from Quarter Start to Quarter End.
-    full_df['Quarter Duration'] = full_df['Quarter Start'].apply(
-        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.offsets.QuarterEnd(0)).strftime('%d %b %Y')}"
-    )
-    
-    # Create sequential Quarter labels.
-    quarter_labels = {q: f"Quarter {i+1}" for i, q in enumerate(sorted(all_quarters))}
-    full_df['Quarter'] = full_df['Quarter Start'].map(quarter_labels)
-    
-    # Compute Follower Count at the end of each quarter.
+    # Compute Follower Count at the end of each week.
+    # For each week, count members whose join_date <= Week Ending and whose last exit (if any) is after Week Ending.
     follower_count_dict = {}
-    for q in all_quarters:
-        q_end = q + pd.offsets.QuarterEnd(0)
+    for week, group in weekly_group.groupby('Week'):
+        # Use the Week Ending date from the group.
+        week_end = group['Week Ending'].iloc[0]
         count = 0
         for member, info in stats['member_status'].items():
             join_date = info['first_seen']
-            if join_date <= q_end:
+            if join_date <= week_end:
                 left_times = info.get('left_times', [])
-                if not left_times or max(left_times) > q_end:
+                if not left_times or max(left_times) > week_end:
                     count += 1
-        follower_count_dict[q] = count
-    full_df['Follower Count'] = full_df['Quarter Start'].map(follower_count_dict)
+        follower_count_dict[week] = count
+    weekly_group['Follower Count'] = weekly_group['Week'].map(follower_count_dict)
     
-    final_df = full_df[['Quarter', 'Quarter Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
-    final_df = final_df.sort_values(['Quarter', 'Member Name'])
+    # Create Week Duration column.
+    weekly_group['Week Duration'] = weekly_group.apply(
+        lambda row: f"{row['Week Starting'].strftime('%d %b %Y')} - {row['Week Ending'].strftime('%d %b %Y')}", axis=1
+    )
+    
+    final_df = weekly_group[['Week', 'Week Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
+    final_df = final_df.sort_values(['Week', 'Member Name'])
     return final_df
 
 def create_wordcloud(df):
@@ -460,10 +451,10 @@ def main():
             if not activity_df.empty:
                 st.dataframe(activity_df)
             
-            st.subheader("Quarterly Engagement Analysis")
-            engagement_df = create_quarterly_engagement_table(stats)
-            if not engagement_df.empty:
-                st.dataframe(engagement_df)
+            st.subheader("Weekly Engagement Analysis")
+            weekly_engagement_df = create_weekly_engagement_table(stats)
+            if not weekly_engagement_df.empty:
+                st.dataframe(weekly_engagement_df)
             
             st.subheader("Word Cloud (Overall)")
             try:
