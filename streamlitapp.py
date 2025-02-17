@@ -93,7 +93,6 @@ def process_chunk(chunk, patterns):
             date = parse_date(timestamp_str)
             if date:
                 msg_clean = message.strip().replace("\u200e", "").strip()
-                # If message exactly equals "user left", treat as exit event.
                 if msg_clean.lower() == clean_member_name(user).lower() + " left":
                     exits.append({
                         'timestamp': date,
@@ -122,7 +121,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Fallback: try strict left pattern.
+        # Try strict left pattern.
         sl = patterns['strict_left'].match(line)
         if sl:
             raw_date_str, user, left_msg = sl.groups()
@@ -224,25 +223,15 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             member_status[user]['left_times_str'] = []
         member_status[user]['left_times'].append(exit_event['timestamp'])
         member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
-
-    # Determine permanent exits: for each user, if a join exists after an exit, ignore that exit.
-    last_join_ts = {}
-    for j in all_joins:
-        usr = j['user']
-        tstamp = j['timestamp']
-        if usr not in last_join_ts or tstamp > last_join_ts[usr]:
-            last_join_ts[usr] = tstamp
-
-    permanent_exits = []
-    for e in all_exits:
-        usr = e['user']
-        exit_time = e['timestamp']
-        if usr in last_join_ts and last_join_ts[usr] > exit_time:
-            continue
-        permanent_exits.append(e)
-    # Compute unique permanent left members.
-    left_members_set = {e['user'] for e in permanent_exits}
-    left_members = len(left_members_set)
+    
+    # Compute permanent left members from the timeline.
+    timeline_df = create_member_timeline({'member_status': member_status, 'join_events': all_joins, 'messages_data': all_messages, 'exit_events': all_exits})
+    if not timeline_df.empty:
+        last_events = timeline_df.sort_values('Date').groupby('Member', as_index=False).last()
+        permanent_left_users = set(last_events[last_events['Event Type'] == 'left']['Member'])
+    else:
+        permanent_left_users = set()
+    left_members = len(permanent_left_users)
     total_members = len(member_status)
     current_members = total_members - left_members
 
@@ -254,71 +243,82 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         'current_members': current_members,
         'left_members': left_members,
         'exit_events': all_exits,
-        'join_events': all_joins,
-        'permanent_exits': permanent_exits
+        'join_events': all_joins
     }
 
 def create_member_timeline(stats):
-    """Create a timeline showing join and left events with running totals."""
+    """
+    Create a timeline DataFrame of join and left events.
+    Adds a 'Member' column to indicate the user.
+    """
     events = []
+    # Process join events from member_status (first_seen) as join event.
     for member, status in stats['member_status'].items():
         if status.get('first_seen'):
             events.append({
-                'date': status['first_seen'],
+                'Date': status['first_seen'],
                 'change': 1,
-                'event_type': 'join',
-                'member': member
+                'Event Type': 'join',
+                'Member': member
             })
         if 'left_times' in status:
             for lt in status['left_times']:
                 events.append({
-                    'date': lt,
+                    'Date': lt,
                     'change': -1,
-                    'event_type': 'left',
-                    'member': member
+                    'Event Type': 'left',
+                    'Member': member
                 })
     if not events:
         return pd.DataFrame()
-    events.sort(key=lambda x: x['date'])
+    events.sort(key=lambda x: x['Date'])
     timeline_data = []
     member_count = 0
     for event in events:
         member_count += event['change']
         timeline_data.append({
-            'Date': event['date'],
+            'Date': event['Date'],
             'Member Count': member_count,
-            'Event': f"{event['member']} {event['event_type']}",
-            'Event Type': event['event_type']
+            'Event': f"{event['Member']} {event['Event Type']}",
+            'Event Type': event['Event Type'],
+            'Member': event['Member']
         })
     return pd.DataFrame(timeline_data)
+
+def compute_permanent_left():
+    """
+    Compute a DataFrame of permanently left members based on the timeline.
+    A member is considered permanently left if their last event is 'left'.
+    """
+    # This function assumes that parse_chat_log_file has already built member_status.
+    # We recompute the timeline here.
+    # (Alternatively, one could store the timeline in stats.)
+    # For our purposes, we recompute it from member_status, join_events, and exit_events.
+    # Here, we assume stats is global; in practice, you'd pass it as a parameter.
+    # Instead, we'll compute the timeline using the already computed member_status.
+    return None  # We'll not use this function directly; we use create_member_timeline below.
 
 def create_exit_events_table(stats):
     """
     Create a table for permanent exit events with two columns:
-    | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
+    | Name of Exit Person | Exit Date & Time (from the txt file) |
+    Determined from the timeline: only members whose last event is 'left' are included.
     """
-    permanent_exits = stats.get('permanent_exits', [])
-    if not permanent_exits:
+    timeline_df = create_member_timeline(stats)
+    if timeline_df.empty:
         return pd.DataFrame()
-    df = pd.DataFrame(permanent_exits)
-    df = df.rename(columns={
-        'user': 'Name of Exit Person',
-        'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
-    })
-    # Drop duplicates so each person appears once.
-    df = df.drop_duplicates(subset=['Name of Exit Person'])
-    return df[['Name of Exit Person', 'Exit Date & Time (exactly from the txt file)']]
+    # Get the last event for each member.
+    last_events = timeline_df.sort_values('Date').groupby('Member', as_index=False).last()
+    left_df = last_events[last_events['Event Type'] == 'left']
+    left_df = left_df.rename(columns={'Member': 'Name of Exit Person', 'Date': 'Exit Date & Time (from the txt file)'})
+    return left_df[['Name of Exit Person', 'Exit Date & Time (from the txt file)']]
 
-def create_member_activity_table_with_weekly(stats):
-    """
-    Create a merged Member Activity Analysis table that includes:
-      - Overall message count, exit events, activity status, join and last exit dates.
-      - Weekly message counts: each week (by its start date) becomes a separate column showing the number of messages that member sent that week.
-    """
-    # Build overall activity data.
+def create_member_activity_table(stats):
+    """Create an overall Member Activity Analysis table."""
     activity_data = []
     for member, status in stats['member_status'].items():
-        current_status = 'Left' if status.get('left_times') else 'Active'
+        current_status = 'Left' if (member in 
+            create_exit_events_table(stats)['Name of Exit Person'].tolist()) else 'Active'
         exit_count = len(status.get('left_times', []))
         activity_data.append({
             'Member Name': member,
@@ -329,31 +329,62 @@ def create_member_activity_table_with_weekly(stats):
             'Last Exit Date': (status['left_times'][-1].strftime('%d %b %Y')
                                if status.get('left_times') else 'Present')
         })
-    activity_df = pd.DataFrame(activity_data)
-    
-    # Pivot weekly message counts.
+    df = pd.DataFrame(activity_data)
+    if not df.empty:
+        df = df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
+    return df
+
+def create_weekly_activity_table(stats):
+    """
+    Create a separate Weekly Message & Member Analysis table showing:
+      - Week Starting (date)
+      - Total Messages Sent that week
+      - Comma-separated names of members who joined that week
+      - Comma-separated names of members who left that week
+    """
     messages = stats.get('messages_data', [])
-    if messages:
-        msg_df = pd.DataFrame(messages)
+    join_events = stats.get('join_events', [])
+    exit_events = stats.get('exit_events', [])
+
+    if not messages:
+        return pd.DataFrame()
+
+    msg_df = pd.DataFrame(messages)
+    join_df = pd.DataFrame(join_events)
+    exit_df = pd.DataFrame(exit_events)
+
+    # Process messages by week.
+    if not msg_df.empty and 'timestamp' in msg_df.columns:
         msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-        msg_df['Week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
-        weekly_pivot = msg_df.groupby(['user', 'Week']).size().unstack(fill_value=0)
-        # Format week column headers.
-        weekly_pivot.columns = [col.strftime('%d %b %Y') for col in weekly_pivot.columns]
-        weekly_pivot.reset_index(inplace=True)
+        msg_df['Week Starting'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_msgs = msg_df.groupby('Week Starting').size().reset_index(name='Messages Sent')
     else:
-        weekly_pivot = pd.DataFrame(columns=['user'])
-    
-    # Merge overall activity with weekly pivot.
-    merged_df = pd.merge(activity_df, weekly_pivot, left_on='Member Name', right_on='user', how='left')
-    merged_df.drop('user', axis=1, inplace=True)
-    # Fill NaN with 0 in weekly message count columns.
-    fixed_cols = ['Member Name', 'Overall Message Count', 'Exit Events', 'Activity Status', 'Join Date', 'Last Exit Date']
-    for col in merged_df.columns:
-        if col not in fixed_cols:
-            merged_df[col] = merged_df[col].fillna(0).astype(int)
-    merged_df = merged_df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
-    return merged_df
+        weekly_msgs = pd.DataFrame(columns=['Week Starting', 'Messages Sent'])
+
+    # Process joins by week.
+    if not join_df.empty and 'timestamp' in join_df.columns:
+        join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
+        join_df['Week Starting'] = join_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_joins = join_df.groupby('Week Starting')['user'].apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Joined')
+    else:
+        weekly_joins = pd.DataFrame(columns=['Week Starting', 'Joined'])
+
+    # Process exits by week.
+    if not exit_df.empty and 'timestamp' in exit_df.columns:
+        exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
+        exit_df['Week Starting'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
+        weekly_exits = exit_df.groupby('Week Starting')['user'].apply(lambda x: ', '.join(sorted(set(x)))).reset_index(name='Left')
+    else:
+        weekly_exits = pd.DataFrame(columns=['Week Starting', 'Left'])
+
+    # Merge the weekly data.
+    weekly_data = pd.merge(weekly_msgs, weekly_joins, on='Week Starting', how='outer')
+    weekly_data = pd.merge(weekly_data, weekly_exits, on='Week Starting', how='outer')
+    weekly_data = weekly_data.fillna('')
+    weekly_data = weekly_data.sort_values('Week Starting')
+    # Format Week Starting as a string.
+    weekly_data['Week Starting'] = weekly_data['Week Starting'].dt.strftime('%d %b %Y')
+    return weekly_data
 
 def create_wordcloud(df):
     """Generate an optimized word cloud image from overall messages."""
@@ -383,7 +414,7 @@ def main():
             st.error("No messages found.")
             return
         
-        # Analysis is overall; no user-specific selection.
+        # Analysis is overall.
         if st.sidebar.button("Show Analysis"):
             st.title("Chat Analysis Results")
             total_messages = len(stats['messages_data'])
@@ -400,7 +431,7 @@ def main():
             for col, (title, value) in zip([col1, col2, col3, col4], metrics):
                 with col:
                     st.metric(title, value)
-                    
+            
             st.subheader("Member Exit Analysis")
             exit_df = create_exit_events_table(stats)
             if not exit_df.empty:
@@ -409,29 +440,15 @@ def main():
             else:
                 st.write("No exit events recorded")
             
-            st.subheader("Member Timeline")
-            timeline_df = create_member_timeline(stats)
-            if not timeline_df.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(
-                    x=timeline_df['Date'],
-                    y=timeline_df['Member Count'],
-                    mode='lines',
-                    name='Member Count',
-                    line=dict(color='#2E86C1', width=2)
-                ))
-                fig.update_layout(
-                    title='Group Member Count Over Time',
-                    xaxis_title='Date',
-                    yaxis_title='Number of Members',
-                    hovermode='x unified'
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            st.subheader("Member Activity Analysis")
+            activity_df = create_member_activity_table(stats)
+            if not activity_df.empty:
+                st.dataframe(activity_df)
             
-            st.subheader("Member Activity Analysis (with Weekly Message Counts)")
-            activity_weekly_df = create_member_activity_table_with_weekly(stats)
-            if not activity_weekly_df.empty:
-                st.dataframe(activity_weekly_df)
+            st.subheader("Weekly Message & Member Analysis")
+            weekly_df = create_weekly_activity_table(stats)
+            if not weekly_df.empty:
+                st.dataframe(weekly_df)
             
             st.subheader("Word Cloud (Overall)")
             try:
