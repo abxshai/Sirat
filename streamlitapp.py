@@ -195,7 +195,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
     
-    # Unified member_status: For each member, use the earliest event (join or message) as the join date.
+    # Unified member_status: for each member, use the earliest event (join or message) as join date.
     unified_member_status = {}
     for event in sorted(all_messages + all_joins, key=lambda x: x['timestamp']):
         user = event['user']
@@ -320,31 +320,42 @@ def create_quarterly_engagement_table(stats):
     """
     Create a Quarterly Engagement Analysis table with columns:
       Quarter, Quarter Duration, Member Name, Number of Messages Sent, Follower Count.
-    Group the messages by quarter using the exact timestamps from the txt file.
-    Quarter numbering starts from 1.
-    Follower Count is computed as the number of active members at the end of that quarter.
+    Group messages by quarter using the exact timestamps from the txt file.
+    Quarter numbering starts at 1 and is sequential, and all quarters between the earliest and latest date are included.
+    Follower Count is the number of active members at the end of that quarter.
     """
     msg_df = pd.DataFrame(stats['messages_data'])
     if msg_df.empty:
         return pd.DataFrame()
     msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-    # Group by quarter using period 'Q'
-    msg_df['Quarter Start'] = msg_df['timestamp'].dt.to_period('Q').dt.start_time
-    # Group by Quarter Start and Member to count messages.
-    quarterly_group = msg_df.groupby(['Quarter Start', 'user']).size().reset_index(name='Number of Messages Sent')
-    quarterly_group = quarterly_group.rename(columns={'user': 'Member Name'})
+    # Determine the continuous quarter range.
+    start_quarter = msg_df['timestamp'].min().to_period('Q').to_timestamp()
+    end_quarter = msg_df['timestamp'].max().to_period('Q').to_timestamp()
+    all_quarters = pd.date_range(start=start_quarter, end=end_quarter, freq='QS')
+    
+    # Group messages by quarter (using quarter start) and member.
+    msg_df['Quarter Start'] = msg_df['timestamp'].dt.to_period('Q').dt.to_timestamp()
+    grouped = msg_df.groupby(['Quarter Start', 'user']).size().reset_index(name='Number of Messages Sent')
+    grouped = grouped.rename(columns={'user': 'Member Name'})
+    
+    # Create a DataFrame with all combinations of quarters and members.
+    all_members = grouped['Member Name'].unique()
+    full_index = pd.MultiIndex.from_product([all_quarters, all_members], names=['Quarter Start', 'Member Name'])
+    full_df = grouped.set_index(['Quarter Start', 'Member Name']).reindex(full_index, fill_value=0).reset_index()
+    
     # Quarter Duration: from Quarter Start to Quarter End.
-    quarterly_group['Quarter Duration'] = quarterly_group['Quarter Start'].apply(
+    full_df['Quarter Duration'] = full_df['Quarter Start'].apply(
         lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.offsets.QuarterEnd(0)).strftime('%d %b %Y')}"
     )
-    unique_quarters = sorted(quarterly_group['Quarter Start'].unique())
-    quarter_labels = {q: f"Quarter {i+1}" for i, q in enumerate(unique_quarters)}
-    quarterly_group['Quarter'] = quarterly_group['Quarter Start'].map(quarter_labels)
+    
+    # Create sequential Quarter labels.
+    quarter_labels = {q: f"Quarter {i+1}" for i, q in enumerate(sorted(all_quarters))}
+    full_df['Quarter'] = full_df['Quarter Start'].map(quarter_labels)
     
     # Compute Follower Count at the end of each quarter.
     follower_count_dict = {}
-    for q_start in unique_quarters:
-        q_end = q_start + pd.offsets.QuarterEnd(0)
+    for q in all_quarters:
+        q_end = q + pd.offsets.QuarterEnd(0)
         count = 0
         for member, info in stats['member_status'].items():
             join_date = info['first_seen']
@@ -352,10 +363,10 @@ def create_quarterly_engagement_table(stats):
                 left_times = info.get('left_times', [])
                 if not left_times or max(left_times) > q_end:
                     count += 1
-        follower_count_dict[q_start] = count
-    quarterly_group['Follower Count'] = quarterly_group['Quarter Start'].map(follower_count_dict)
+        follower_count_dict[q] = count
+    full_df['Follower Count'] = full_df['Quarter Start'].map(follower_count_dict)
     
-    final_df = quarterly_group[['Quarter', 'Quarter Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
+    final_df = full_df[['Quarter', 'Quarter Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
     final_df = final_df.sort_values(['Quarter', 'Member Name'])
     return final_df
 
