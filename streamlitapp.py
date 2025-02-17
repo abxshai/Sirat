@@ -145,8 +145,8 @@ def process_chunk(chunk, patterns):
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file.
-    Splits the file into chunks, applies regex patterns,
-    and returns messages, join events, exit events, and a unified member_status.
+    Reads the file, splits into chunks, applies regex patterns,
+    and returns messages, join events, exit events, and unified member_status.
     """
     try:
         content = uploaded_file.read()
@@ -189,7 +189,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
     
-    # Compute unified member_status: for each member, use the earliest event (join or message)
+    # Unified member_status: for each member, use the earliest event (join or message) as join date.
     unified_member_status = {}
     for event in sorted(all_messages + all_joins, key=lambda x: x['timestamp']):
         user = event['user']
@@ -198,7 +198,6 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
                 'first_seen': event['timestamp'],
                 'first_seen_str': event['timestamp_str']
             }
-    # Append exit events.
     for exit_event in all_exits:
         user = exit_event['user']
         if user not in unified_member_status:
@@ -212,8 +211,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         unified_member_status[user]['left_times'].append(exit_event['timestamp'])
         unified_member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Determine permanent exit info: For each member, if their last event is exit, they are permanently left.
-    # Build timeline using unified join dates and exit events.
+    # Build the membership timeline using unified join dates and all exit events.
     timeline = create_membership_timeline({
         'member_status': unified_member_status,
         'exit_events': all_exits
@@ -240,13 +238,13 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
 
 def create_membership_timeline(stats):
     """
-    Create a timeline DataFrame using the unified join dates and exit events.
-    For each member, add a join event at their earliest event and, if they are permanently left,
-    add their last exit event. Then compute the cumulative active member count over time.
+    Create a timeline DataFrame using unified join dates and exit events.
+    For each member, add a join event at their unified join date and,
+    if available, their last exit event.
+    Then compute the cumulative active member count over time.
     """
     timeline_events = []
     for member, status in stats['member_status'].items():
-        # Use the actual earliest event as the join event.
         timeline_events.append({
             'timestamp': status['first_seen'],
             'timestamp_str': status['first_seen_str'],
@@ -254,12 +252,9 @@ def create_membership_timeline(stats):
             'Event Type': 'join',
             'change': 1
         })
-        # If member is permanently left, use the last exit event.
         if 'left_times' in status and status['left_times']:
-            # Check if this member is permanently left:
-            # (We'll decide later by comparing with exit table.)
-            # Here, we add the last exit event for all members that have any exit.
             last_exit = max(status['left_times'])
+            # Use the corresponding timestamp_str for last exit
             timeline_events.append({
                 'timestamp': last_exit,
                 'timestamp_str': status['left_times_str'][-1],
@@ -316,6 +311,52 @@ def create_member_activity_table(stats):
     if not df.empty:
         df = df.sort_values(by=['Overall Message Count', 'Member Name'], ascending=[False, True])
     return df
+
+def create_engagement_table(stats):
+    """
+    Create a new table with columns:
+      Week, Week Duration, Member Name, Number of Messages Sent, Follower Count.
+    The week grouping is done directly from the txt file timestamps.
+    Week numbering starts from 1.
+    Follower Count is computed as the number of active members at the end of that week.
+    """
+    msg_df = pd.DataFrame(stats['messages_data'])
+    if msg_df.empty:
+        return pd.DataFrame()
+    msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
+    # Create a "Week Starting" column using period('W'). dt.start_time (which gives Monday as start)
+    msg_df['Week Starting'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
+    # Group by Week Starting and Member (user)
+    weekly_group = msg_df.groupby(['Week Starting', 'user']).size().reset_index(name='Number of Messages Sent')
+    weekly_group = weekly_group.rename(columns={'user': 'Member Name'})
+    # Compute Week Duration as "Start Date - End Date"
+    weekly_group['Week Duration'] = weekly_group['Week Starting'].apply(
+        lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.Timedelta(days=6)).strftime('%d %b %Y')}"
+    )
+    # Determine unique weeks and assign Week labels starting from 1.
+    unique_weeks = sorted(weekly_group['Week Starting'].unique())
+    week_labels = {week: f"Week {i+1}" for i, week in enumerate(unique_weeks)}
+    weekly_group['Week'] = weekly_group['Week Starting'].map(week_labels)
+    
+    # For each unique week, compute Follower Count as the number of active members at the end of that week.
+    follower_count_dict = {}
+    for week_start in unique_weeks:
+        week_end = week_start + pd.Timedelta(days=6)
+        count = 0
+        for member, info in stats['member_status'].items():
+            join_date = info['first_seen']
+            # A member is active at week_end if they joined on or before week_end
+            # and either they never left or their last exit is after week_end.
+            if join_date <= week_end:
+                left_times = info.get('left_times', [])
+                if not left_times or max(left_times) > week_end:
+                    count += 1
+        follower_count_dict[week_start] = count
+    weekly_group['Follower Count'] = weekly_group['Week Starting'].map(follower_count_dict)
+    
+    final_df = weekly_group[['Week', 'Week Duration', 'Member Name', 'Number of Messages Sent', 'Follower Count']]
+    final_df = final_df.sort_values(['Week', 'Member Name'])
+    return final_df
 
 def create_wordcloud(df):
     """Generate an optimized word cloud image from overall messages."""
@@ -376,7 +417,6 @@ def main():
             timeline_df = create_membership_timeline(stats)
             if not timeline_df.empty:
                 fig = go.Figure()
-                # Line for cumulative member count
                 fig.add_trace(go.Scatter(
                     x=timeline_df['Date'],
                     y=timeline_df['Member Count'],
@@ -384,7 +424,7 @@ def main():
                     name='Active Member Count',
                     line=dict(color='#2E86C1', width=2)
                 ))
-                # Overlay red markers for exit events
+                # Overlay red markers for exit events.
                 exit_events = timeline_df[timeline_df['Event Type'] == 'left']
                 if not exit_events.empty:
                     fig.add_trace(go.Scatter(
@@ -408,6 +448,11 @@ def main():
             activity_df = create_member_activity_table(stats)
             if not activity_df.empty:
                 st.dataframe(activity_df)
+            
+            st.subheader("Weekly Engagement Analysis")
+            engagement_df = create_engagement_table(stats)
+            if not engagement_df.empty:
+                st.dataframe(engagement_df)
             
             st.subheader("Word Cloud (Overall)")
             try:
