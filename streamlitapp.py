@@ -201,8 +201,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
 
-    # Combine join events and messages, sorted by timestamp,
-    # to ensure that each member's "first_seen" is truly the earliest event.
+    # Combine join events and messages so each member's "first_seen" is the earliest event.
     combined_events = sorted(all_joins + all_messages, key=lambda x: x['timestamp'])
     member_status = {}
     for event in combined_events:
@@ -210,7 +209,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         if user not in member_status:
             member_status[user] = {
                 'first_seen': event['timestamp'],
-                'first_seen_str': event['timestamp_str']
+                'first_seen_str': event['timestamp_str']  # use exact timestamp from file
             }
     for exit_event in all_exits:
         user = exit_event['user']
@@ -225,9 +224,13 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         member_status[user]['left_times'].append(exit_event['timestamp'])
         member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Compute permanent exit info:
-    # Build a timeline DataFrame; then for each member, take the last event.
-    timeline = create_member_timeline({'member_status': member_status, 'join_events': all_joins, 'messages_data': all_messages, 'exit_events': all_exits})
+    # Compute permanent exit info using the timeline:
+    timeline = create_member_timeline({
+        'member_status': member_status,
+        'join_events': all_joins,
+        'messages_data': all_messages,
+        'exit_events': all_exits
+    })
     if not timeline.empty:
         last_events = timeline.sort_values('Date').groupby('Member', as_index=False).last()
         permanent_left_users = set(last_events[last_events['Event Type'] == 'left']['Member'])
@@ -290,7 +293,7 @@ def create_exit_events_table(stats):
     """
     Create a table for permanent exit events with two columns:
     | Name of Exit Person | Exit Date & Time (from the txt file) |
-    Determined from the timeline: only members whose last event is 'left' are included.
+    Only members whose last event is 'left' are included.
     """
     timeline_df = create_member_timeline(stats)
     if timeline_df.empty:
@@ -301,11 +304,14 @@ def create_exit_events_table(stats):
     return left_df[['Name of Exit Person', 'Exit Date & Time (from the txt file)']]
 
 def create_member_activity_table(stats):
-    """Create an overall Member Activity Analysis table."""
+    """Create an overall Member Activity Analysis table using exact timestamps from the file."""
     activity_data = []
     exit_table = create_exit_events_table(stats)
     permanent_left = exit_table['Name of Exit Person'].tolist() if not exit_table.empty else []
     for member, status in stats['member_status'].items():
+        # Use the exact timestamp strings from the file.
+        join_date = status['first_seen_str']
+        last_exit = status['left_times_str'][-1] if status.get('left_times_str') else 'Present'
         current_status = 'Left' if member in permanent_left else 'Active'
         exit_count = len(status.get('left_times', []))
         activity_data.append({
@@ -313,9 +319,8 @@ def create_member_activity_table(stats):
             'Overall Message Count': stats['user_messages'].get(member, 0),
             'Exit Events': exit_count,
             'Activity Status': current_status,
-            'Join Date': status['first_seen'].strftime('%d %b %Y'),
-            'Last Exit Date': (status['left_times'][-1].strftime('%d %b %Y')
-                               if status.get('left_times') else 'Present')
+            'Join Date': join_date,
+            'Last Exit Date': last_exit
         })
     df = pd.DataFrame(activity_data)
     if not df.empty:
@@ -352,10 +357,12 @@ def main():
         
         if st.sidebar.button("Show Analysis"):
             st.title("Chat Analysis Results")
+            
             total_messages = len(stats['messages_data'])
             total_words = sum(len(msg['message'].split()) for msg in stats['messages_data'])
             media_messages = sum(1 for msg in stats['messages_data'] if "<Media omitted>" in msg['message'])
             links_shared = sum(1 for msg in stats['messages_data'] if "http" in msg['message'].lower())
+            
             col1, col2, col3, col4 = st.columns(4)
             metrics = [
                 ("Total Messages", total_messages),
@@ -374,6 +381,25 @@ def main():
                 st.metric("Total Members Left", len(exit_df))
             else:
                 st.write("No exit events recorded")
+            
+            st.subheader("Member Timeline")
+            timeline_df = create_member_timeline(stats)
+            if not timeline_df.empty:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=timeline_df['Date'],
+                    y=timeline_df['Member Count'],
+                    mode='lines',
+                    name='Member Count',
+                    line=dict(color='#2E86C1', width=2)
+                ))
+                fig.update_layout(
+                    title='Group Member Count Over Time',
+                    xaxis_title='Date',
+                    yaxis_title='Number of Members',
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig, use_container_width=True)
             
             st.subheader("Member Activity Analysis")
             activity_df = create_member_activity_table(stats)
