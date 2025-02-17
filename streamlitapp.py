@@ -72,11 +72,11 @@ def parse_date(date_str):
 def process_chunk(chunk, patterns):
     """
     Process a chunk of lines from the chat log.
-    First, try matching the message pattern.
-    If a match is found, check if the message text (cleaned of invisible characters)
-    exactly equals the sender’s name + " left" (case-insensitive).
-    If so, record this as an exit event; otherwise, as a regular message.
-    Then check for join events and, as fallback, try strict/general left patterns.
+    First try matching the general message pattern.
+    If a match is found, check whether the message text (after cleaning)
+    exactly equals the sender’s name followed by " left". If so, record as an exit event.
+    Otherwise, record as a regular message.
+    Then process join events and any remaining left events.
     """
     messages = []
     joins = []
@@ -122,7 +122,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Try strict left pattern.
+        # As a fallback, try strict left pattern.
         sl = patterns['strict_left'].match(line)
         if sl:
             raw_date_str, user, left_msg = sl.groups()
@@ -154,7 +154,6 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file with improved performance for large files.
     Reads the file as text, splits it into complete lines, and groups lines into chunks.
-    Processes chunks in parallel using regex patterns for messages, joins, and left events.
     """
     try:
         content = uploaded_file.read()
@@ -224,50 +223,34 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         member_status[user]['left_times'].append(exit_event['timestamp'])
         member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    total_members = len(member_status)
-    left_members = sum(1 for m in member_status.values() if m.get('left_times'))
-    current_members = total_members - left_members
+    # For "permanent left" count, we want to count only users who never messaged after leaving.
+    # Compute the last message timestamp for each user.
+    user_last_msg = {}
+    for msg in all_messages:
+        user = msg['user']
+        ts = msg['timestamp']
+        if user in user_last_msg:
+            if ts > user_last_msg[user]:
+                user_last_msg[user] = ts
+        else:
+            user_last_msg[user] = ts
+    permanent_left = 0
+    for user, status in member_status.items():
+        if 'left_times' in status:
+            last_exit = max(status['left_times'])
+            last_msg = user_last_msg.get(user, None)
+            if last_msg is None or last_msg <= last_exit:
+                permanent_left += 1
     
     return {
         'messages_data': all_messages,
         'user_messages': user_messages,
         'member_status': member_status,
-        'total_members': total_members,
-        'current_members': current_members,
-        'left_members': left_members,
+        'total_members': len(member_status),
+        'current_members': len(member_status) - permanent_left,
+        'left_members': permanent_left,
         'exit_events': all_exits
     }
-
-def create_exit_events_table(stats):
-    """
-    Create a separate table for exit events with two columns:
-    | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
-    Filters out exit events for users who sent a message after leaving.
-    """
-    exit_events = stats.get('exit_events', [])
-    if not exit_events:
-        return pd.DataFrame()
-    # Build max message timestamp per user.
-    user_max = {}
-    for msg in stats['messages_data']:
-        user = msg['user']
-        ts = msg['timestamp']
-        if user in user_max:
-            if ts > user_max[user]:
-                user_max[user] = ts
-        else:
-            user_max[user] = ts
-    filtered = []
-    for event in exit_events:
-        user = event['user']
-        if user not in user_max or user_max[user] <= event['timestamp']:
-            filtered.append(event)
-    df = pd.DataFrame(filtered)
-    df = df.rename(columns={
-        'user': 'Name of Exit Person',
-        'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
-    })
-    return df[['Name of Exit Person', 'Exit Date & Time (exactly from the txt file)']]
 
 def create_member_timeline(stats):
     """Create a timeline showing join and left events with running totals."""
@@ -303,71 +286,82 @@ def create_member_timeline(stats):
         })
     return pd.DataFrame(timeline_data)
 
-def create_weekly_activity_table(stats):
+def create_exit_events_table(stats):
     """
-    Create a weekly activity summary table.
-    For each 7-day interval (starting from the earliest message timestamp),
-    this table shows:
-      - Week Start (the raw timestamp of the first message in that interval)
-      - Total Messages in that week
-      - Top Messenger and their message count
-      - Join events in that week (using the raw 'first_seen_str' from member_status)
-      - Exit events in that week (using the raw timestamp strings, after filtering out rejoin cases)
+    Create a separate table for exit events with two columns:
+    | Name of Exit Person | Exit Date & Time (exactly from the txt file) |
+    Only include exit events for users who never messaged after leaving.
     """
-    messages = stats['messages_data']
-    if not messages:
+    exit_events = stats.get('exit_events', [])
+    if not exit_events:
         return pd.DataFrame()
-    min_time = min(msg['timestamp'] for msg in messages)
-    max_time = max(msg['timestamp'] for msg in messages)
-    # Ensure the final (partial) week is included.
-    total_weeks = math.floor((max_time - min_time).total_seconds() / (7 * 86400)) + 1
-    
-    # Precompute max message timestamp per user.
-    user_max = {}
-    for msg in messages:
+    # Compute last message per user.
+    user_last_msg = {}
+    for msg in stats['messages_data']:
         user = msg['user']
         ts = msg['timestamp']
-        if user in user_max:
-            if ts > user_max[user]:
-                user_max[user] = ts
+        if user in user_last_msg:
+            if ts > user_last_msg[user]:
+                user_last_msg[user] = ts
         else:
-            user_max[user] = ts
-    
-    weekly_summary = []
-    for i in range(total_weeks):
-        group_start = min_time + pd.Timedelta(days=7 * i)
-        group_end = group_start + pd.Timedelta(days=7)
-        week_msgs = [msg for msg in messages if group_start <= msg['timestamp'] < group_end]
-        if not week_msgs:
-            continue
-        total_msgs = len(week_msgs)
-        week_start_raw = min(week_msgs, key=lambda x: x['timestamp'])['timestamp_str']
-        counter = Counter(msg['user'] for msg in week_msgs)
-        top_user, top_count = counter.most_common(1)[0]
-        
-        joins = []
-        for user, status in stats['member_status'].items():
-            ts = status['first_seen']
-            if group_start <= ts < group_end:
-                joins.append(f"{user}: {status['first_seen_str']}")
-        
-        exits = []
-        for event in stats['exit_events']:
-            ts = event['timestamp']
-            user = event['user']
-            if group_start <= ts < group_end:
-                if user not in user_max or user_max[user] <= ts:
-                    exits.append(f"{user}: {event['timestamp_str']}")
-        
-        weekly_summary.append({
-            "Week Start": week_start_raw,
-            "Total Messages": total_msgs,
-            "Top Messenger": top_user,
-            "Top Messenger Count": top_count,
-            "Joins": ", ".join(joins),
-            "Exits": ", ".join(exits)
+            user_last_msg[user] = ts
+    # For each exit event, keep only one per user if that user's last message is <= exit event timestamp.
+    filtered = {}
+    for event in exit_events:
+        user = event['user']
+        ts = event['timestamp']
+        last_msg = user_last_msg.get(user, None)
+        if last_msg is None or last_msg <= ts:
+            # If multiple exit events exist for the same user, keep the latest one.
+            if user in filtered:
+                if ts > filtered[user]['timestamp']:
+                    filtered[user] = event
+            else:
+                filtered[user] = event
+    df = pd.DataFrame(list(filtered.values()))
+    df = df.rename(columns={
+        'user': 'Name of Exit Person',
+        'timestamp_str': 'Exit Date & Time (exactly from the txt file)'
+    })
+    return df[['Name of Exit Person', 'Exit Date & Time (exactly from the txt file)']]
+
+def create_member_activity_table(stats):
+    """Create an optimized table of member activity."""
+    activity_data = []
+    for member, status in stats['member_status'].items():
+        current_status = 'Left' if ('left_times' in status and max(status['left_times']) >= 
+                                     (max([msg['timestamp'] for msg in stats['messages_data'] if msg['user'] == member]) if any(msg['user'] == member for msg in stats['messages_data']) else datetime.min)) else 'Active'
+        exit_count = len(status.get('left_times', []))
+        activity_data.append({
+            'Member Name': member,
+            'Message Count': stats['user_messages'].get(member, 0),
+            'Exit Events': exit_count,
+            'Activity Status': current_status,
+            'Join Date': status['first_seen'].strftime('%d %b %Y %I:%M:%S %p'),
+            'Last Exit Date': (max(status['left_times']).strftime('%d %b %Y %I:%M:%S %p')
+                               if status.get('left_times') else 'Present')
         })
-    return pd.DataFrame(weekly_summary)
+    df = pd.DataFrame(activity_data)
+    if not df.empty:
+        df = df.sort_values(by=['Message Count', 'Member Name'], ascending=[False, True])
+    return df
+
+def create_weekly_breakdown(stats):
+    """Create an optimized weekly breakdown of messages and member status."""
+    if not stats['messages_data']:
+        return pd.DataFrame()
+    df = pd.DataFrame(stats['messages_data'])
+    user_msgs = df.groupby('user').size().reset_index(name='Messages Sent')
+    weekly_data = []
+    for _, row in user_msgs.iterrows():
+        user = row['user']
+        status = stats['member_status'].get(user, {})
+        weekly_data.append({
+            'Member Name': user,
+            'Messages Sent': row['Messages Sent'],
+            'Current Status': 'Left' if status.get('left_times') else 'Present'
+        })
+    return pd.DataFrame(weekly_data)
 
 def create_wordcloud(df):
     """Generate an optimized word cloud image from overall messages."""
@@ -401,7 +395,7 @@ def main():
             st.error("No messages found.")
             return
         
-        # Overall analysis only.
+        # Overall analysis only; removed per-user filtering.
         st.title("Chat Analysis Results")
         total_messages = len(stats['messages_data'])
         total_words = sum(len(msg['message'].split()) for msg in stats['messages_data'])
@@ -423,7 +417,7 @@ def main():
         exit_df = create_exit_events_table(stats)
         if not exit_df.empty:
             st.dataframe(exit_df)
-            st.metric("Total Members Left", stats['left_members'])
+            st.metric("Total Members Left", len(exit_df))
         else:
             st.write("No exit events recorded")
         
@@ -446,10 +440,10 @@ def main():
             )
             st.plotly_chart(fig, use_container_width=True)
         
-        st.subheader("Weekly Activity Summary")
-        weekly_df = create_weekly_activity_table(stats)
-        if not weekly_df.empty:
-            st.dataframe(weekly_df)
+        st.subheader("Member Activity Analysis")
+        activity_df = create_member_activity_table(stats)
+        if not activity_df.empty:
+            st.dataframe(activity_df)
         
         st.subheader("Message Distribution")
         message_df = pd.DataFrame(list(stats['user_messages'].items()), columns=['Member', 'Messages'])
@@ -468,6 +462,11 @@ def main():
             showlegend=False
         )
         st.plotly_chart(fig, use_container_width=True)
+        
+        st.subheader("Weekly Message & Member Analysis")
+        weekly_df = create_weekly_breakdown(stats)
+        if not weekly_df.empty:
+            st.dataframe(weekly_df)
         
         st.subheader("Word Cloud")
         try:
