@@ -36,14 +36,11 @@ def get_llm_reply(client, prompt, word_placeholder):
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Analyze the chat log and summarize: most active users, "
-                        "group membership changes, and engagement patterns. "
-                        "Present in a clear, tabular format."
-                    )
-                },
+                {"role": "system", "content": (
+                    "Analyze the chat log and summarize: most active users, "
+                    "group membership changes, and engagement patterns. "
+                    "Present in a clear, tabular format."
+                )},
                 {"role": "user", "content": prompt}
             ],
             temperature=1,
@@ -82,14 +79,13 @@ def process_chunk(chunk, patterns):
         if not line:
             continue
 
-        # Try message pattern.
+        # Message pattern.
         m = patterns['message'].match(line)
         if m:
             timestamp_str, user, message = m.groups()
             date = parse_date(timestamp_str)
             if date:
                 msg_clean = message.strip().replace("\u200e", "").strip()
-                # If the message exactly equals "User left", record as exit.
                 if msg_clean.lower() == clean_member_name(user).lower() + " left":
                     exits.append({
                         'timestamp': date,
@@ -105,7 +101,7 @@ def process_chunk(chunk, patterns):
                     })
             continue
 
-        # Try join pattern.
+        # Join pattern.
         j = patterns['join'].match(line)
         if j:
             timestamp_str, user = j.groups()
@@ -118,7 +114,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Try strict left pattern.
+        # Strict left pattern.
         sl = patterns['strict_left'].match(line)
         if sl:
             raw_date_str, user, left_msg = sl.groups()
@@ -131,7 +127,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Try general left pattern.
+        # General left pattern.
         l = patterns['left'].search(line)
         if l:
             timestamp_str, user = l.groups()
@@ -149,8 +145,8 @@ def process_chunk(chunk, patterns):
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
     Parse WhatsApp chat log file.
-    Reads the file, splits into chunks, applies regex patterns,
-    and returns messages, join events, exit events, and member_status.
+    Splits the file into chunks, applies regex patterns,
+    and returns messages, join events, exit events, and a unified member_status.
     """
     try:
         content = uploaded_file.read()
@@ -163,10 +159,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         return None
 
     lines = text.splitlines()
-    chunks = []
-    for i in range(0, len(lines), lines_per_chunk):
-        chunk = "\n".join(lines[i:i+lines_per_chunk])
-        chunks.append(chunk)
+    chunks = ["\n".join(lines[i:i+lines_per_chunk]) for i in range(0, len(lines), lines_per_chunk)]
     
     patterns = {
         'message': re.compile(
@@ -183,9 +176,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         )
     }
     
-    all_messages = []
-    all_joins = []
-    all_exits = []
+    all_messages, all_joins, all_exits = [], [], []
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(process_chunk, chunk, patterns) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures):
@@ -193,21 +184,12 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
             all_messages.extend(messages)
             all_joins.extend(joins)
             all_exits.extend(exits)
-
+            
     all_messages.sort(key=lambda x: x['timestamp'])
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
-
-    # Determine global earliest timestamp among all events.
-    combined_events = all_messages + all_joins + all_exits
-    if combined_events:
-        global_earliest = min(event['timestamp'] for event in combined_events)
-        global_earliest_str = next(event['timestamp_str'] for event in combined_events if event['timestamp'] == global_earliest)
-    else:
-        global_earliest = None
-        global_earliest_str = None
-
-    # For each member, set the join date as the earliest event (whether join or message).
+    
+    # Compute unified member_status: for each member, use the earliest event (join or message)
     unified_member_status = {}
     for event in sorted(all_messages + all_joins, key=lambda x: x['timestamp']):
         user = event['user']
@@ -216,20 +198,13 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
                 'first_seen': event['timestamp'],
                 'first_seen_str': event['timestamp_str']
             }
-    # Now override every member's join date with the global earliest timestamp.
-    if global_earliest:
-        for member in unified_member_status:
-            unified_member_status[member]['first_seen'] = global_earliest
-            unified_member_status[member]['first_seen_str'] = global_earliest_str
-
-    # Append exit events to member_status.
+    # Append exit events.
     for exit_event in all_exits:
         user = exit_event['user']
         if user not in unified_member_status:
-            # If a member appears only in exit events.
             unified_member_status[user] = {
-                'first_seen': global_earliest if global_earliest else exit_event['timestamp'],
-                'first_seen_str': global_earliest_str if global_earliest_str else exit_event['timestamp_str']
+                'first_seen': exit_event['timestamp'],
+                'first_seen_str': exit_event['timestamp_str']
             }
         if 'left_times' not in unified_member_status[user]:
             unified_member_status[user]['left_times'] = []
@@ -237,10 +212,10 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         unified_member_status[user]['left_times'].append(exit_event['timestamp'])
         unified_member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Build the membership timeline using the unified join dates and all exit events.
+    # Determine permanent exit info: For each member, if their last event is exit, they are permanently left.
+    # Build timeline using unified join dates and exit events.
     timeline = create_membership_timeline({
         'member_status': unified_member_status,
-        'join_events': all_joins,
         'exit_events': all_exits
     })
     if not timeline.empty:
@@ -251,7 +226,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     left_members = len(permanent_left_users)
     total_members = len(unified_member_status)
     current_members = total_members - left_members
-
+    
     return {
         'messages_data': all_messages,
         'user_messages': Counter(msg['user'] for msg in all_messages),
@@ -265,13 +240,13 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
 
 def create_membership_timeline(stats):
     """
-    Create a timeline DataFrame using the unified join dates from member_status
-    and all exit events.
-    Every member's join event is set to the global earliest timestamp.
+    Create a timeline DataFrame using the unified join dates and exit events.
+    For each member, add a join event at their earliest event and, if they are permanently left,
+    add their last exit event. Then compute the cumulative active member count over time.
     """
     timeline_events = []
-    # Use the unified join date (global earliest) for every member.
     for member, status in stats['member_status'].items():
+        # Use the actual earliest event as the join event.
         timeline_events.append({
             'timestamp': status['first_seen'],
             'timestamp_str': status['first_seen_str'],
@@ -279,16 +254,19 @@ def create_membership_timeline(stats):
             'Event Type': 'join',
             'change': 1
         })
-        if 'left_times' in status:
-            for ts in status['left_times']:
-                # For exit events, we ignore the exact left string.
-                timeline_events.append({
-                    'timestamp': ts,
-                    'timestamp_str': None,
-                    'Member': member,
-                    'Event Type': 'left',
-                    'change': -1
-                })
+        # If member is permanently left, use the last exit event.
+        if 'left_times' in status and status['left_times']:
+            # Check if this member is permanently left:
+            # (We'll decide later by comparing with exit table.)
+            # Here, we add the last exit event for all members that have any exit.
+            last_exit = max(status['left_times'])
+            timeline_events.append({
+                'timestamp': last_exit,
+                'timestamp_str': status['left_times_str'][-1],
+                'Member': member,
+                'Event Type': 'left',
+                'change': -1
+            })
     timeline_events.sort(key=lambda x: x['timestamp'])
     cum_count = 0
     timeline_data = []
@@ -305,8 +283,8 @@ def create_membership_timeline(stats):
 
 def create_exit_events_table(stats):
     """
-    Create a table for permanent exit events with two columns:
-    Only include members whose last event is 'left'.
+    Create a table for permanent exit events with two columns.
+    Only include members whose last event is 'left' according to the membership timeline.
     """
     timeline_df = create_membership_timeline(stats)
     if timeline_df.empty:
@@ -398,17 +376,30 @@ def main():
             timeline_df = create_membership_timeline(stats)
             if not timeline_df.empty:
                 fig = go.Figure()
+                # Line for cumulative member count
                 fig.add_trace(go.Scatter(
                     x=timeline_df['Date'],
                     y=timeline_df['Member Count'],
                     mode='lines',
-                    name='Member Count',
+                    name='Active Member Count',
                     line=dict(color='#2E86C1', width=2)
                 ))
+                # Overlay red markers for exit events
+                exit_events = timeline_df[timeline_df['Event Type'] == 'left']
+                if not exit_events.empty:
+                    fig.add_trace(go.Scatter(
+                        x=exit_events['Date'],
+                        y=exit_events['Member Count'],
+                        mode='markers',
+                        name='Exit Event',
+                        marker=dict(color='red', size=10),
+                        text=exit_events['Event'],
+                        hoverinfo='text+x'
+                    ))
                 fig.update_layout(
                     title='Group Member Count Over Time',
                     xaxis_title='Date',
-                    yaxis_title='Number of Members',
+                    yaxis_title='Active Members',
                     hovermode='x unified'
                 )
                 st.plotly_chart(fig, use_container_width=True)
