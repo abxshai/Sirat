@@ -59,9 +59,16 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_date(date_str):
-    """Parse date string with error handling using dayfirst=True."""
+    """
+    Parse a WhatsApp-style date string.
+    Use dayfirst=True. If the parsed year is below 1900 (i.e. a two-digit year misinterpreted),
+    add 2000 to force it into the 2000s.
+    """
     try:
-        return date_parser.parse(date_str, fuzzy=False, dayfirst=True)
+        dt = date_parser.parse(date_str, fuzzy=False, dayfirst=True)
+        if dt.year < 1900:
+            dt = dt.replace(year=dt.year + 2000)
+        return dt
     except Exception:
         return None
 
@@ -79,7 +86,7 @@ def process_chunk(chunk, patterns):
         if not line:
             continue
 
-        # Message pattern.
+        # Try message pattern.
         m = patterns['message'].match(line)
         if m:
             timestamp_str, user, message = m.groups()
@@ -101,7 +108,7 @@ def process_chunk(chunk, patterns):
                     })
             continue
 
-        # Join pattern.
+        # Try join pattern.
         j = patterns['join'].match(line)
         if j:
             timestamp_str, user = j.groups()
@@ -114,7 +121,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # Strict left pattern.
+        # Try strict left pattern.
         sl = patterns['strict_left'].match(line)
         if sl:
             raw_date_str, user, left_msg = sl.groups()
@@ -127,7 +134,7 @@ def process_chunk(chunk, patterns):
                 })
             continue
 
-        # General left pattern.
+        # Try general left pattern.
         l = patterns['left'].search(line)
         if l:
             timestamp_str, user = l.groups()
@@ -211,7 +218,7 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         unified_member_status[user]['left_times'].append(exit_event['timestamp'])
         unified_member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
-    # Build the membership timeline using unified join dates and all exit events.
+    # Build membership timeline using unified join dates and exit events.
     timeline = create_membership_timeline({
         'member_status': unified_member_status,
         'exit_events': all_exits
@@ -254,7 +261,6 @@ def create_membership_timeline(stats):
         })
         if 'left_times' in status and status['left_times']:
             last_exit = max(status['left_times'])
-            # Use the corresponding timestamp_str for last exit
             timeline_events.append({
                 'timestamp': last_exit,
                 'timestamp_str': status['left_times_str'][-1],
@@ -314,7 +320,7 @@ def create_member_activity_table(stats):
 
 def create_engagement_table(stats):
     """
-    Create a new table with columns:
+    Create a table with columns:
       Week, Week Duration, Member Name, Number of Messages Sent, Follower Count.
     The week grouping is done directly from the txt file timestamps.
     Week numbering starts from 1.
@@ -324,29 +330,24 @@ def create_engagement_table(stats):
     if msg_df.empty:
         return pd.DataFrame()
     msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
-    # Create a "Week Starting" column using period('W'). dt.start_time (which gives Monday as start)
     msg_df['Week Starting'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
-    # Group by Week Starting and Member (user)
+    # Group by Week Starting and Member
     weekly_group = msg_df.groupby(['Week Starting', 'user']).size().reset_index(name='Number of Messages Sent')
     weekly_group = weekly_group.rename(columns={'user': 'Member Name'})
-    # Compute Week Duration as "Start Date - End Date"
     weekly_group['Week Duration'] = weekly_group['Week Starting'].apply(
         lambda d: f"{d.strftime('%d %b %Y')} - {(d + pd.Timedelta(days=6)).strftime('%d %b %Y')}"
     )
-    # Determine unique weeks and assign Week labels starting from 1.
     unique_weeks = sorted(weekly_group['Week Starting'].unique())
     week_labels = {week: f"Week {i+1}" for i, week in enumerate(unique_weeks)}
     weekly_group['Week'] = weekly_group['Week Starting'].map(week_labels)
     
-    # For each unique week, compute Follower Count as the number of active members at the end of that week.
+    # Compute Follower Count at week end.
     follower_count_dict = {}
     for week_start in unique_weeks:
         week_end = week_start + pd.Timedelta(days=6)
         count = 0
         for member, info in stats['member_status'].items():
             join_date = info['first_seen']
-            # A member is active at week_end if they joined on or before week_end
-            # and either they never left or their last exit is after week_end.
             if join_date <= week_end:
                 left_times = info.get('left_times', [])
                 if not left_times or max(left_times) > week_end:
@@ -424,7 +425,6 @@ def main():
                     name='Active Member Count',
                     line=dict(color='#2E86C1', width=2)
                 ))
-                # Overlay red markers for exit events.
                 exit_events = timeline_df[timeline_df['Event Type'] == 'left']
                 if not exit_events.empty:
                     fig.add_trace(go.Scatter(
