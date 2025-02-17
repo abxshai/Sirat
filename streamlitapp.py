@@ -89,7 +89,7 @@ def process_chunk(chunk, patterns):
             date = parse_date(timestamp_str)
             if date:
                 msg_clean = message.strip().replace("\u200e", "").strip()
-                # If the message exactly equals "User left", treat as an exit event.
+                # If the message exactly equals "User left", record as exit.
                 if msg_clean.lower() == clean_member_name(user).lower() + " left":
                     exits.append({
                         'timestamp': date,
@@ -198,33 +198,48 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
 
-    # Unified member_status: For each member, the join date is the earliest event among join or message events.
-    combined_events = sorted(all_joins + all_messages, key=lambda x: x['timestamp'])
-    member_status = {}
-    for event in combined_events:
+    # Determine global earliest timestamp among all events.
+    combined_events = all_messages + all_joins + all_exits
+    if combined_events:
+        global_earliest = min(event['timestamp'] for event in combined_events)
+        global_earliest_str = next(event['timestamp_str'] for event in combined_events if event['timestamp'] == global_earliest)
+    else:
+        global_earliest = None
+        global_earliest_str = None
+
+    # For each member, set the join date as the earliest event (whether join or message).
+    unified_member_status = {}
+    for event in sorted(all_messages + all_joins, key=lambda x: x['timestamp']):
         user = event['user']
-        if user not in member_status:
-            member_status[user] = {
+        if user not in unified_member_status:
+            unified_member_status[user] = {
                 'first_seen': event['timestamp'],
-                'first_seen_str': event['timestamp_str']  # use exact timestamp string from file
+                'first_seen_str': event['timestamp_str']
             }
+    # Now override every member's join date with the global earliest timestamp.
+    if global_earliest:
+        for member in unified_member_status:
+            unified_member_status[member]['first_seen'] = global_earliest
+            unified_member_status[member]['first_seen_str'] = global_earliest_str
+
+    # Append exit events to member_status.
     for exit_event in all_exits:
         user = exit_event['user']
-        if user not in member_status:
-            # If a member only appears in exit events, record that timestamp.
-            member_status[user] = {
-                'first_seen': exit_event['timestamp'],
-                'first_seen_str': exit_event['timestamp_str']
+        if user not in unified_member_status:
+            # If a member appears only in exit events.
+            unified_member_status[user] = {
+                'first_seen': global_earliest if global_earliest else exit_event['timestamp'],
+                'first_seen_str': global_earliest_str if global_earliest_str else exit_event['timestamp_str']
             }
-        if 'left_times' not in member_status[user]:
-            member_status[user]['left_times'] = []
-            member_status[user]['left_times_str'] = []
-        member_status[user]['left_times'].append(exit_event['timestamp'])
-        member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
+        if 'left_times' not in unified_member_status[user]:
+            unified_member_status[user]['left_times'] = []
+            unified_member_status[user]['left_times_str'] = []
+        unified_member_status[user]['left_times'].append(exit_event['timestamp'])
+        unified_member_status[user]['left_times_str'].append(exit_event['timestamp_str'])
     
     # Build the membership timeline using the unified join dates and all exit events.
     timeline = create_membership_timeline({
-        'member_status': member_status,
+        'member_status': unified_member_status,
         'join_events': all_joins,
         'exit_events': all_exits
     })
@@ -234,13 +249,13 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     else:
         permanent_left_users = set()
     left_members = len(permanent_left_users)
-    total_members = len(member_status)
+    total_members = len(unified_member_status)
     current_members = total_members - left_members
 
     return {
         'messages_data': all_messages,
         'user_messages': Counter(msg['user'] for msg in all_messages),
-        'member_status': member_status,
+        'member_status': unified_member_status,
         'total_members': total_members,
         'current_members': current_members,
         'left_members': left_members,
@@ -250,13 +265,12 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
 
 def create_membership_timeline(stats):
     """
-    Create a timeline DataFrame using unified join dates from member_status
-    and all exit events. For each member, we add one join event at their
-    earliest timestamp (from member_status) and then all their exit events.
-    This ensures that the cumulative member count reflects the exact lifetime count.
+    Create a timeline DataFrame using the unified join dates from member_status
+    and all exit events.
+    Every member's join event is set to the global earliest timestamp.
     """
     timeline_events = []
-    # Use the unified join date for every member.
+    # Use the unified join date (global earliest) for every member.
     for member, status in stats['member_status'].items():
         timeline_events.append({
             'timestamp': status['first_seen'],
@@ -267,7 +281,7 @@ def create_membership_timeline(stats):
         })
         if 'left_times' in status:
             for ts in status['left_times']:
-                # For simplicity, we ignore the exact left string here.
+                # For exit events, we ignore the exact left string.
                 timeline_events.append({
                     'timestamp': ts,
                     'timestamp_str': None,
