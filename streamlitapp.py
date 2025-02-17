@@ -63,94 +63,128 @@ def get_llm_reply(client, prompt, word_placeholder):
         return None
 
 def parse_date(date_str):
-    """Parse date string with dayfirst=True for dd/mm/yy format."""
+    """
+    Parse a WhatsApp-style date string.
+    We use dayfirst=True to handle dd/mm/yy formats typical in some exports.
+    """
     try:
         return date_parser.parse(date_str, fuzzy=False, dayfirst=True)
     except Exception:
         return None
 
-def process_chunk(chunk, patterns):
+##############################
+# Unified Parsing of Lines
+##############################
+
+# One pattern to capture [date/time], remainder:
+TIMESTAMP_PATTERN = re.compile(
+    r'^\[?('
+    r'\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}'
+    r'(?::\d{2})?\s*[APap][Mm]?'
+    r')\]?\s*(.*)$'
+)
+
+def process_line(line):
     """
-    Process a chunk of lines from the chat log.
-    Extract messages, join events, and exit events using regex.
+    Parse a single line from the chat log to determine if it's:
+      - A message (with user + message text)
+      - A join event
+      - An exit event
+    Returns a tuple: (timestamp, user, message, event_type)
+      event_type can be "message", "join", or "exit"
+      For join/exit, message may be empty or None
+    If parsing fails, returns None.
+    """
+    line = line.strip()
+    if not line:
+        return None
+
+    match = TIMESTAMP_PATTERN.match(line)
+    if not match:
+        return None  # Line doesn't match the typical "[date] something" pattern
+
+    timestamp_str = match.group(1).strip()
+    remainder = match.group(2).strip()
+    dt = parse_date(timestamp_str)
+    if not dt:
+        return None
+
+    # Check if remainder ends with 'joined' or 'left' (case insensitive)
+    lower_remainder = remainder.lower()
+    if lower_remainder.endswith(" joined"):
+        # e.g. "Sohil Badhwar_SW joined"
+        user_part = remainder[:-6].strip()  # remove 'joined'
+        return dt, clean_member_name(user_part), None, "join"
+    elif lower_remainder.endswith(" left"):
+        # e.g. "Sonaali left"
+        user_part = remainder[:-4].strip()  # remove 'left'
+        return dt, clean_member_name(user_part), None, "exit"
+    else:
+        # It's a message with user + message
+        # We split on the LAST occurrence of ": " 
+        # because user names can contain colons too.
+        splitted = remainder.rsplit(": ", 1)
+        if len(splitted) == 2:
+            user_part, message_part = splitted
+            return dt, clean_member_name(user_part), message_part.strip(), "message"
+        else:
+            # Can't parse user:message format
+            # Possibly a system message or unknown format
+            return None
+
+def process_chunk(chunk):
+    """
+    Process a chunk of lines from the chat log, returning lists of
+    messages, joins, and exits. This uses our unified parse approach.
     """
     messages = []
     joins = []
     exits = []
-    
+
     for line in chunk.splitlines():
-        line = line.strip()
-        if not line:
+        parsed = process_line(line)
+        if not parsed:
             continue
-
-        # Match message pattern
-        m = patterns['message'].match(line)
-        if m:
-            timestamp_str, user, message = m.groups()
-            date = parse_date(timestamp_str)
-            if date:
-                msg_clean = message.strip().replace("\u200e", "").strip()
-                # If the message exactly equals "User left", treat as exit event
-                if msg_clean.lower() == clean_member_name(user).lower() + " left":
-                    exits.append({
-                        'timestamp': date,
-                        'timestamp_str': timestamp_str,
-                        'user': clean_member_name(user)
-                    })
-                else:
-                    messages.append({
-                        'timestamp': date,
-                        'timestamp_str': timestamp_str,
-                        'user': clean_member_name(user),
-                        'message': message
-                    })
-            continue
-
-        # Match join pattern
-        j = patterns['join'].match(line)
-        if j:
-            timestamp_str, user = j.groups()
-            date = parse_date(timestamp_str)
-            if date:
-                joins.append({
-                    'timestamp': date,
-                    'timestamp_str': timestamp_str,
-                    'user': clean_member_name(user)
-                })
-            continue
-
-        # Match strict left pattern
-        sl = patterns['strict_left'].match(line)
-        if sl:
-            raw_date_str, user, left_msg = sl.groups()
-            date = parse_date(raw_date_str)
-            if date:
-                exits.append({
-                    'timestamp': date,
-                    'timestamp_str': raw_date_str,
-                    'user': clean_member_name(user)
-                })
-            continue
-
-        # Match general left pattern
-        l = patterns['left'].search(line)
-        if l:
-            timestamp_str, user = l.groups()
-            date = parse_date(timestamp_str)
-            if date:
-                exits.append({
-                    'timestamp': date,
-                    'timestamp_str': timestamp_str,
-                    'user': clean_member_name(user)
-                })
-            continue
+        dt, user, message, event_type = parsed
+        # Separate out event types
+        if event_type == "join":
+            joins.append({
+                'timestamp': dt,
+                'timestamp_str': line,  # or you could store the raw date part
+                'user': user
+            })
+        elif event_type == "exit":
+            exits.append({
+                'timestamp': dt,
+                'timestamp_str': line,
+                'user': user
+            })
+        elif event_type == "message":
+            messages.append({
+                'timestamp': dt,
+                'timestamp_str': timestamp_str_from_line(line),
+                'user': user,
+                'message': message
+            })
 
     return messages, joins, exits
 
+def timestamp_str_from_line(line):
+    """
+    Utility to extract just the date/time portion from a line
+    (for a cleaner 'timestamp_str' field). Optional convenience.
+    """
+    m = TIMESTAMP_PATTERN.match(line.strip())
+    return m.group(1).strip() if m else line.strip()
+
+##############################
+# Parse the Chat Log (File)
+##############################
+
 def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
     """
-    Parse WhatsApp chat log file with improved performance for large files.
-    Returns messages, join events, exit events, etc. from the txt file.
+    Parse WhatsApp chat log file using the unified approach.
+    Returns messages, join events, exit events, etc.
     """
     try:
         content = uploaded_file.read()
@@ -169,33 +203,20 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         chunk = "\n".join(lines[i:i+lines_per_chunk])
         chunks.append(chunk)
     
-    # Regex patterns for different types of lines
-    patterns = {
-        'message': re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?):\s(.*)$'
-        ),
-        'join': re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) joined'
-        ),
-        'strict_left': re.compile(
-            r'^\[(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?\s*[APap][Mm])\]\s*([^:]+):\s*(?:\u200e)?(.*?)\s+left\s*$'
-        ),
-        'left': re.compile(
-            r'^\[?(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},\s*\d{1,2}:\d{2}(?::\d{2})?(?:\s*[APap][Mm])?)\]?\s*-?\s*(.*?) left'
-        )
-    }
-    
     all_messages = []
     all_joins = []
     all_exits = []
+
+    # Process chunks in parallel
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(process_chunk, chunk, patterns) for chunk in chunks]
+        futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
         for future in concurrent.futures.as_completed(futures):
             messages, joins, exits = future.result()
             all_messages.extend(messages)
             all_joins.extend(joins)
             all_exits.extend(exits)
 
+    # Sort them by timestamp
     all_messages.sort(key=lambda x: x['timestamp'])
     all_joins.sort(key=lambda x: x['timestamp'])
     all_exits.sort(key=lambda x: x['timestamp'])
@@ -236,6 +257,10 @@ def parse_chat_log_file(uploaded_file, lines_per_chunk=1000):
         'exit_events': all_exits,
         'join_events': all_joins
     }
+
+##############################
+# Creating Tables & Charts
+##############################
 
 def create_final_exit_table(stats):
     """
@@ -282,7 +307,7 @@ def create_weekly_activity_table(stats):
       - # of messages
       - Who joined that week
       - Who left that week
-    Group by the actual date/time from the txt file, ensuring dayfirst format is honored.
+    Group by the actual date/time from the txt file (day-first).
     """
     messages = stats.get('messages_data', [])
     join_events = stats.get('join_events', [])
@@ -292,14 +317,11 @@ def create_weekly_activity_table(stats):
     if not messages:
         return pd.DataFrame()
 
-    # Convert each set of events into DataFrame
     msg_df = pd.DataFrame(messages)
     join_df = pd.DataFrame(join_events)
     exit_df = pd.DataFrame(exit_events)
 
-    # --------------------
-    # Handle MESSAGES
-    # --------------------
+    # 1. MESSAGES
     if not msg_df.empty and 'timestamp' in msg_df.columns:
         msg_df['timestamp'] = pd.to_datetime(msg_df['timestamp'])
         msg_df['week'] = msg_df['timestamp'].dt.to_period('W').dt.start_time
@@ -307,9 +329,7 @@ def create_weekly_activity_table(stats):
     else:
         weekly_msgs = pd.DataFrame(columns=['week', 'Messages Sent'])
 
-    # --------------------
-    # Handle JOINS
-    # --------------------
+    # 2. JOINS
     if not join_df.empty and 'timestamp' in join_df.columns:
         join_df['timestamp'] = pd.to_datetime(join_df['timestamp'])
         join_df['week'] = join_df['timestamp'].dt.to_period('W').dt.start_time
@@ -318,9 +338,7 @@ def create_weekly_activity_table(stats):
     else:
         weekly_joins = pd.DataFrame(columns=['week', 'Joined'])
 
-    # --------------------
-    # Handle EXITS
-    # --------------------
+    # 3. EXITS
     if not exit_df.empty and 'timestamp' in exit_df.columns:
         exit_df['timestamp'] = pd.to_datetime(exit_df['timestamp'])
         exit_df['week'] = exit_df['timestamp'].dt.to_period('W').dt.start_time
@@ -329,13 +347,9 @@ def create_weekly_activity_table(stats):
     else:
         weekly_exits = pd.DataFrame(columns=['week', 'Left'])
 
-    # --------------------
-    # Merge all weekly data
-    # --------------------
+    # Merge them all
     weekly_data = pd.merge(weekly_msgs, weekly_joins, on='week', how='outer')
     weekly_data = pd.merge(weekly_data, weekly_exits, on='week', how='outer')
-
-    # Fill empty cells with blank
     weekly_data = weekly_data.fillna('')
     weekly_data = weekly_data.sort_values('week')
 
@@ -343,7 +357,7 @@ def create_weekly_activity_table(stats):
 
 def create_wordcloud(all_messages):
     """
-    Generate a word cloud from the entire chat (overall).
+    Generate a word cloud from all messages.
     """
     texts = [m['message'] for m in all_messages]
     combined_text = " ".join(texts)
@@ -356,6 +370,10 @@ def create_wordcloud(all_messages):
         collocations=False
     ).generate(combined_text)
     return wordcloud
+
+##############################
+# Main Streamlit App
+##############################
 
 def main():
     st.title("WhatsApp Chat Analyzer")
@@ -373,7 +391,7 @@ def main():
             st.error("No messages found.")
             return
         
-        # Simply display "Show Analysis" button (no user selection).
+        # Show overall analysis
         if st.button("Show Analysis"):
             st.header("Overall Chat Analysis")
             
@@ -436,7 +454,7 @@ def main():
             except Exception as e:
                 st.error(f"Error generating word cloud: {str(e)}")
 
-            # If you want an LLM summary, you can include it here:
+            # Optionally, if you want an LLM summary:
             # st.subheader("Chat Analysis Summary (LLM)")
             # if st.button("Generate LLM Summary"):
             #     try:
