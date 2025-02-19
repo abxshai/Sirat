@@ -6,3 +6,4 @@ groq
 python-dateutil
 seaborn
 numpy
+wordcloud
